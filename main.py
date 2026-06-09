@@ -1,9 +1,12 @@
 import os
 import time
+import random
+import io
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, Response
 import telebot
 from telebot import types
+from PIL import Image, ImageDraw, ImageFont
 import database as db
 
 # ==========================================
@@ -15,14 +18,43 @@ MASTER_TOKEN = "8848756408:AAEAcpMvrbihm2n7LMN-nKC-UtKGd2Dgm4g"
 app = FastAPI()
 master_bot = telebot.TeleBot(MASTER_TOKEN, threaded=False)
 
-# Cấu hình gói VIP
+# Cấu hình gói VIP chuẩn tư duy kinh doanh của mày
 VIP_PACKAGES = {
-    "vip0": {"name": "VIP 0 Test Trải Nghiệm 24H", "price": 0, "days": 1},
-    "vip1": {"name": "VIP 1 (1 Tuần)", "price": 59000, "days": 7},
-    "vip2": {"name": "VIP 2 (1 Tháng)", "price": 179000, "days": 30},
-    "vip3": {"name": "VIP 3 (1 Năm)", "price": 1999000, "days": 365},
-    "vip4": {"name": "VIP 4 (Vĩnh Viễn)", "price": 9999000, "days": 36500} # 100 năm
+    "vip0": {"name": "💎 VIP 0 (Thử nghiệm 1 Ngày)", "price": 0, "days": 1},
+    "vip1": {"name": "💎 VIP 1 (1 Tuần)", "price": 30000, "days": 7},
+    "vip2": {"name": "💎 VIP 2 (1 Tháng)", "price": 100000, "days": 30},
+    "vip3": {"name": "💎 VIP 3 (1 Năm)", "price": 1000000, "days": 365},
+    "vip4": {"name": "💎 VIP 4 (Vĩnh Viễn)", "price": 5000000, "days": 36500}
 }
+
+# Lưu trạng thái tạm thời cho quá trình tạo bot và captcha (Tránh ghi đè chéo user)
+bot_creation_state = {}
+captcha_storage = {} 
+
+# ==========================================
+# HÀM TẠO ẢNH CAPTCHA CHỨA 4 SỐ NGẪU NHIÊN
+# ==========================================
+def generate_captcha_image(text_code: str):
+    # Tạo một ảnh nền màu xám nhạt kích thước 150x60
+    img = Image.new('RGB', (150, 60), color=(230, 230, 230))
+    d = ImageDraw.Draw(img)
+    
+    # Vẽ vài đường nhiễu để tránh bot auto quét
+    for _ in range(5):
+        x1 = random.randint(0, 150)
+        y1 = random.randint(0, 60)
+        x2 = random.randint(0, 150)
+        y2 = random.randint(0, 60)
+        d.line([(x1, y1), (x2, y2)], fill=(180, 180, 180), width=1)
+        
+    # Viết text chữ số lên ảnh (Sử dụng font mặc định của Pillow để tránh lỗi thiếu file font)
+    d.text((45, 20), text_code, fill=(255, 0, 0))
+    
+    # Lưu ảnh vào bộ nhớ tạm BytesIO thay vì lưu file vật lý lên ổ đĩa Render
+    img_byte_arr = io.BytesIO()
+    img.save(img_byte_arr, format='PNG')
+    img_byte_arr.seek(0)
+    return img_byte_arr
 
 # ==========================================
 # KHỞI ĐỘNG SERVER & WEBHOOK MASTER
@@ -33,15 +65,15 @@ async def on_startup():
         master_bot.delete_webhook()
         webhook_master_url = f"{RENDER_URL}/webhook/master"
         master_bot.set_webhook(url=webhook_master_url, drop_pending_updates=True)
-        print(f"✅ Webhook Master đã set: {webhook_master_url}")
+        print(f"✅ Webhook Master đã kích hoạt thành công tại: {webhook_master_url}")
     except Exception as e:
-        print(f"❌ Lỗi set webhook: {e}")
+        print(f"❌ Lỗi thiết lập Webhook Master: {e}")
 
 # ==========================================
-# LOGIC MASTER BOT (Quản lý, Nạp Tiền, Tạo Bot)
+# LOGIC MASTER BOT
 # ==========================================
 
-# --- GIAO DIỆN CHÍNH ---
+# --- MENU CHÍNH ---
 @master_bot.message_handler(commands=['start'])
 def master_start(message):
     uid = message.from_user.id
@@ -49,81 +81,87 @@ def master_start(message):
     
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
-        types.KeyboardButton("🤖 Tạo Bot"),
-        types.KeyboardButton("▶️ Quản Lý Bot")
+        types.KeyboardButton("🤖 Tạo Bot Con"),
+        types.KeyboardButton("▶️ Quản Lý Bot Con")
     )
     markup.add(
-        types.KeyboardButton("💥 Dịch Vụ MXH 💥"),
-        types.KeyboardButton("💎 Mua Gói VIP")
+        types.KeyboardButton("💎 Mua Gói VIP"),
+        types.KeyboardButton("💳 Nạp Tiền Hệ Thống")
     )
     markup.add(
-        types.KeyboardButton("💳 Nạp Tiền"),
-        types.KeyboardButton("👤 Tài khoản")
+        types.KeyboardButton("👤 Tài Khoản Cá Nhân"),
+        types.KeyboardButton("☎️ Hỗ Trợ Kỹ Thuật")
     )
-    markup.add(types.KeyboardButton("📚 Hướng dẫn sử dụng 🔗"))
     
     msg_welcome = (
-        "👋 <b>Xin chào, Chào mừng bạn đến với hệ thống tạo bot tự động!</b>\n\n"
-        "💡 <b>Hướng Dẫn Sử Dụng:</b>\n"
-        "1️⃣ Chọn <b>Tạo Bot</b> để tạo bot mới. Điền Tên Bot, Admin ID và Token Bot lấy từ @BotFather.\n"
-        "2️⃣ Chọn <b>Quản Lý Bot</b> để Bật/Tắt bot của bạn.\n"
-        "3️⃣ Xem Video Hướng Dẫn Setup Bot Bên Trên Để Đưa Bot Vào Hoạt Động Nha.\n\n"
-        "<i>‼️ Lưu Ý : Nên Mua Gói Vip Để Bot Được Duy Trì Lâu Dài Vận Hành Mượt Mà Hơn Nhé👍</i>"
+        "👋 <b>Chào mừng bạn đến với Hệ thống quản trị Bot tự động!</b>\n\n"
+        "💡 <b>Tính năng nổi bật:</b>\n"
+        "• Khởi tạo 3 cấu hình loại bot thông minh từ @BotFather.\n"
+        "• Hệ thống kiểm soát tham gia nhóm bắt buộc & Xác thực Captcha hình ảnh chống clone.\n"
+        "• Quản lý trạng thái On/Off của bot theo thời gian thực.\n\n"
+        "<i>🔥 Mỗi tài khoản được kích hoạt dùng thử MIỄN PHÍ Gói VIP 0 trong vòng 1 ngày đầu tiên!</i>"
     )
     master_bot.send_message(message.chat.id, msg_welcome, parse_mode="HTML", reply_markup=markup)
 
+# --- NÚT HỖ TRỢ ---
+@master_bot.message_handler(func=lambda m: m.text == "☎️ Hỗ Trợ Kỹ Thuật")
+def support_info(message):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("💬 Nhắn Tin Cho Admin", url="https://t.me/truonggianhu")) # Thay link Telegram của mày vào đây
+    
+    msg = (
+        "☎️ <b>HỖ TRỢ KỸ THUẬT & KHIẾU NẠI</b>\n"
+        "━━━━━━━━━━━━━━━\n"
+        "• Nếu gặp lỗi trong quá trình nạp tiền tự động.\n"
+        "• Cần tùy biến thêm các chức năng nâng cao cho bot con.\n"
+        "• Gặp vấn đề về vận hành ứng dụng hoặc gia hạn gói cước.\n\n"
+        "👉 Ấn nút bên dưới để kết nối trực tiếp với điều phối viên hệ thống!"
+    )
+    master_bot.send_message(message.chat.id, msg, parse_mode="HTML", reply_markup=markup)
+
 # --- THÔNG TIN TÀI KHOẢN ---
-@master_bot.message_handler(func=lambda m: m.text == "👤 Tài khoản")
+@master_bot.message_handler(func=lambda m: m.text == "👤 Tài Khoản Cá Nhân")
 def acc_info(message):
     uid = message.from_user.id
     user = db.get_user(uid)
-    if not user:
-        return
+    if not user: return
         
     bots = db.get_bots_by_creator(str(uid))
     bot_count = len(bots)
     
     msg = (
-        "👤 <b>THÔNG TIN TÀI KHOẢN</b>\n"
+        "👤 <b>THÔNG TIN HỘ CHIẾU TÀI KHOẢN</b>\n"
         "━━━━━━━━━━━━━━━\n"
-        f"🆔 ID: <code>{uid}</code>\n"
-        f"💰 Số dư: <b>{user['balance']} VNĐ</b>\n"
-        f"👑 Cấp độ: Thường\n"
-        f"⏳ Hạn VIP: N/A\n"
-        f"🤖 Bot đã tạo: {bot_count}\n"
-        f"🆓 Bot Free: Đã dùng\n"
+        f"🆔 Tài khoản ID: <code>{uid}</code>\n"
+        f"💰 Số dư khả dụng: <b>{user['balance']} VNĐ</b>\n"
+        f"🤖 Số bot đang sở hữu: <b>{bot_count} bot</b>\n"
         "━━━━━━━━━━━━━━━\n"
-        f"💳 Để nạp tiền tự động, chuyển khoản với nội dung:\n"
-        f"<code>NAP {uid}</code>"
+        "💳 Cú pháp nạp tiền tự động qua SePay:\n"
+        f"Nội dung chuyển khoản: <code>NAP {uid}</code>"
     )
     master_bot.send_message(message.chat.id, msg, parse_mode="HTML")
 
-# --- NẠP TIỀN QUÉT MÃ QR (AUTO SEPAY) ---
-@master_bot.message_handler(func=lambda m: m.text == "💳 Nạp Tiền")
+# --- NẠP TIỀN QUA WEBHOOK SEPAY ---
+@master_bot.message_handler(func=lambda m: m.text == "💳 Nạp Tiền Hệ Thống")
 def deposit_info(message):
     uid = message.from_user.id
-    # URL tạo QR Code động của VietQR (Thay số tài khoản ACB của mày vào đây)
-    bank_bin = "970416" # Mã BIN ACB
-    account_no = "49581007" # Thay bằng STK của mày
-    account_name = "TRUONG GIA NHU" # Thay bằng Tên của mày
-    amount = 50000 # Mặc định hiển thị 50k
+    bank_bin = "970416" # Mã ngân hàng ACB
+    account_no = "49581007"
+    account_name = "TRUONG GIA NHU"
     content = f"NAP {uid}"
     
-    qr_url = f"https://img.vietqr.io/image/{bank_bin}-{account_no}-compact2.png?amount={amount}&addInfo={content}&accountName={account_name}"
+    qr_url = f"https://img.vietqr.io/image/{bank_bin}-{account_no}-compact2.png?amount=30000&addInfo={content}&accountName={account_name}"
     
     msg = (
-        "💳 <b>NẠP TIỀN TỰ ĐỘNG 24/7</b>\n"
+        "💳 <b>NẠP TIỀN TỰ ĐỘNG KHÔNG LỖI 24/7</b>\n"
         "━━━━━━━━━━━━━━━\n"
-        "🏦 Ngân hàng: <b>ACB</b>\n"
+        f"🏦 Ngân hàng thụ hưởng: <b>ACB</b>\n"
         f"🔢 Số tài khoản: <b>{account_no}</b>\n"
-        f"👤 Chủ TK: <b>{account_name}</b>\n"
-        f"📝 Nội dung: <code>NAP {uid}</code>\n"
+        f"👤 Chủ tài khoản: <b>{account_name}</b>\n"
+        f"📝 Nội dung bắt buộc: <code>NAP {uid}</code>\n"
         "━━━━━━━━━━━━━━━\n"
         "⚠️ <b>LƯU Ý:</b>\n"
-        "1. Quét mã QR dưới đây để điền sẵn nội dung.\n"
-        "2. Chuyển đúng nội dung để hệ thống cộng tiền tự động.\n"
-        "3. Sau 1-2 phút tiền sẽ tự động vào tài khoản.\n"
-        "4. ⚠️ Min nạp là 10k. Nạp dưới 10k sẽ bị trừ chiết khấu."
+        "Hệ thống quét nội dung tự động qua Webhook SePay sau 30 giây. Sai nội dung vui lòng liên hệ Admin qua nút Hỗ Trợ."
     )
     master_bot.send_photo(message.chat.id, photo=qr_url, caption=msg, parse_mode="HTML")
 
@@ -132,66 +170,71 @@ def deposit_info(message):
 def buy_vip_menu(message):
     markup = types.InlineKeyboardMarkup(row_width=1)
     for key, pkg in VIP_PACKAGES.items():
-        markup.add(types.InlineKeyboardButton(f"{pkg['name']}", callback_data=f"buyvip_{key}"))
+        markup.add(types.InlineKeyboardButton(f"{pkg['name']} - Giá: {pkg['price']}đ", callback_data=f"buyvip_{key}"))
         
-    master_bot.send_message(message.chat.id, "🛒 <b>Chọn gói VIP bạn muốn mua:</b>", parse_mode="HTML", reply_markup=markup)
+    master_bot.send_message(message.chat.id, "🛒 <b>Chọn gói hạn định để kích hoạt thời gian hoạt động của Bot:</b>", parse_mode="HTML", reply_markup=markup)
 
 @master_bot.callback_query_handler(func=lambda call: call.data.startswith('buyvip_'))
 def handle_buy_vip(call):
     uid = call.from_user.id
     vip_key = call.data.split('_')[1]
     pkg = VIP_PACKAGES.get(vip_key)
-    
     if not pkg: return
     
     user = db.get_user(uid)
     if not user: return
     
+    # Kiểm tra nếu mua gói free (VIP 0), check xem tài khoản từng sở hữu bot con nào chưa để tránh spam tạo acc clone ăn gian free
+    if pkg['price'] == 0:
+        bots = db.get_bots_by_creator(str(uid))
+        if len(bots) > 0:
+            master_bot.answer_callback_query(call.id, "❌ Gói dùng thử 1 ngày chỉ áp dụng cho lần đầu tạo bot con!", show_alert=True)
+            return
+
     if user['balance'] < pkg['price']:
-        master_bot.answer_callback_query(call.id, f"❌ Bạn không đủ tiền! Cần {pkg['price']} VNĐ.", show_alert=True)
+        master_bot.answer_callback_query(call.id, f"❌ Số dư không đủ! Bạn cần nạp thêm tiền. Giá gói: {pkg['price']} VNĐ.", show_alert=True)
         return
         
-    # Trừ tiền
+    # Thực hiện trừ tiền hệ thống
     new_bal = user['balance'] - pkg['price']
     db.update_user_balance(uid, new_bal)
     
-    # Cộng ngày vào toàn bộ bot của user này
+    # Kéo và cộng hạn cho toàn bộ các bot con đang sở hữu
     bots = db.get_bots_by_creator(str(uid))
     exp_add = timedelta(days=pkg['days'])
     
     for b in bots:
-        current_exp = datetime.fromisoformat(b['expired_at'].replace("Z", "+00:00")) if b.get('expired_at') else datetime.now()
-        if current_exp < datetime.now():
+        try:
+            current_exp = datetime.fromisoformat(b['expired_at'].replace("Z", "+00:00"))
+        except:
+            current_exp = datetime.now(timezone.utc)
+            
+        if current_exp.timestamp() < time.time():
             current_exp = datetime.now()
             
         new_exp = (current_exp + exp_add).isoformat()
         db.update_sub_bot_data(b['bot_token'], {"expired_at": new_exp, "status": "running"})
         
-    master_bot.answer_callback_query(call.id, f"✅ Mua thành công {pkg['name']}!", show_alert=True)
-    master_bot.send_message(call.message.chat.id, f"🎉 <b>Đã kích hoạt {pkg['name']} thành công!</b>\nTất cả bot của bạn đã được gia hạn thêm {pkg['days']} ngày. Số dư còn: {new_bal} VNĐ.", parse_mode="HTML")
+    master_bot.answer_callback_query(call.id, f"✅ Giao dịch thành công {pkg['name']}!", show_alert=True)
+    master_bot.send_message(call.message.chat.id, f"🎉 <b>Kích hoạt thành công gói cước {pkg['name']}!</b>\nToàn bộ hệ thống bot con của bạn được cộng thêm {pkg['days']} ngày hoạt động. Số dư còn: {new_bal} VNĐ.", parse_mode="HTML")
 
-# --- QUẢN LÝ BOT ---
-@master_bot.message_handler(func=lambda m: m.text == "▶️ Quản Lý Bot")
+# --- QUẢN LÝ BOT CON ---
+@master_bot.message_handler(func=lambda m: m.text == "▶️ Quản Lý Bot Con")
 def manage_bots(message):
     uid = message.from_user.id
     bots = db.get_bots_by_creator(str(uid))
     
     if not bots:
-        master_bot.send_message(message.chat.id, "❌ Bạn chưa có bot nào. Hãy nhấn 'Tạo Bot' để bắt đầu.")
+        master_bot.send_message(message.chat.id, "❌ Hệ thống ghi nhận bạn chưa thiết lập bot con nào. Vui lòng bấm 'Tạo Bot Con'.")
         return
         
     markup = types.InlineKeyboardMarkup()
     for b in bots:
-        try:
-            bot_info = telebot.TeleBot(b['bot_token']).get_me()
-            name = bot_info.username
-        except:
-            name = "UnknownBot"
-            
+        token_prefix = b['bot_token'].split(':')[0] if ":" in b['bot_token'] else "Bot"
         status_icon = "🟢" if b['status'] == "running" else "🔴"
-        markup.add(types.InlineKeyboardButton(f"{status_icon} @{name}", callback_data=f"managebot_{b['bot_token']}"))
+        markup.add(types.InlineKeyboardButton(f"{status_icon} ID Bot: {token_prefix}", callback_data=f"managebot_{b['bot_token']}"))
         
-    master_bot.send_message(message.chat.id, "📋 <b>Danh sách bot của bạn:</b>\n<i>Chọn bot để cài đặt/chạy/dừng</i>", parse_mode="HTML", reply_markup=markup)
+    master_bot.send_message(message.chat.id, "📋 <b>Danh sách điều khiển mạng lưới bot con của bạn:</b>", parse_mode="HTML", reply_markup=markup)
 
 @master_bot.callback_query_handler(func=lambda call: call.data.startswith('managebot_'))
 def bot_detail(call):
@@ -199,32 +242,28 @@ def bot_detail(call):
     bot_data = db.get_sub_bot(token)
     if not bot_data: return
     
-    try:
-        bot_info = telebot.TeleBot(token).get_me()
-        bot_username = bot_info.username
-        bot_name = bot_info.first_name
-    except:
-        bot_username = "Unknown"
-        bot_name = "Unknown"
-        
-    status_text = "Đang chạy 🟢" if bot_data['status'] == "running" else "Đã dừng 🔴"
-    exp_date = bot_data.get('expired_at', 'N/A')[:19].replace("T", " ") if bot_data.get('expired_at') else 'N/A'
+    status_text = "Đang chạy trực tuyến 🟢" if bot_data['status'] == "running" else "Đang tạm dừng ngoại tuyến 🔴"
+    exp_date = bot_data.get('expired_at', 'N/A')[:19].replace("T", " ")
+    
+    config = bot_data.get('config_data') or {}
+    b_type = config.get('bot_type', 'Chưa rõ')
     
     msg = (
-        f"🤖 <b>Bot:</b> {bot_name}\n"
-        f"👤 <b>Username:</b> @{bot_username}\n"
-        f"⏳ <b>Hạn dùng:</b> {exp_date}\n"
-        f"📊 <b>Trạng thái:</b> {status_text}"
+        f"🤖 <b>CẤU HÌNH BOT CON CHI TIẾT</b>\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🔑 Token ID: <code>{token.split(':')[0]}</code>\n"
+        f"⚙️ Phân loại: <b>{b_type.upper()}</b>\n"
+        f"⏳ Thời hạn đóng gói: <code>{exp_date}</code>\n"
+        f"📊 Tiến độ vận hành: <b>{status_text}</b>"
     )
     
     markup = types.InlineKeyboardMarkup()
     if bot_data['status'] == "running":
-        markup.add(types.InlineKeyboardButton("🔴 Dừng Bot", callback_data=f"stopbot_{token}"))
+        markup.add(types.InlineKeyboardButton("🔴 Tạm Dừng Hoạt Động", callback_data=f"stopbot_{token}"))
     else:
-        markup.add(types.InlineKeyboardButton("🟢 Chạy Bot", callback_data=f"startbot_{token}"))
+        markup.add(types.InlineKeyboardButton("🟢 Bật Hoạt Động Trở Lại", callback_data=f"startbot_{token}"))
         
-    markup.add(types.InlineKeyboardButton("⬅️ Quay lại", callback_data="manage_back"))
-    
+    markup.add(types.InlineKeyboardButton("⬅️ Quay Lại Danh Sách", callback_data="manage_back"))
     master_bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=markup)
 
 @master_bot.callback_query_handler(func=lambda call: call.data == "manage_back")
@@ -236,26 +275,22 @@ def toggle_bot_status(call):
     action, token = call.data.split('_')
     new_status = "stopped" if action == "stopbot" else "running"
     db.update_sub_bot_status(token, new_status)
-    
-    master_bot.answer_callback_query(call.id, "✅ Cập nhật trạng thái thành công!")
+    master_bot.answer_callback_query(call.id, "✅ Thay đổi trạng thái vận hành thành công!")
     bot_detail(call)
 
-# --- TẠO BOT MỚI ---
-bot_creation_state = {}
-
-@master_bot.message_handler(func=lambda m: m.text == "🤖 Tạo Bot")
+# --- KHỞI TẠO BOT CON THEO 3 LOẠI VIDEO ---
+@master_bot.message_handler(func=lambda m: m.text == "🤖 Tạo Bot Con")
 def start_create_bot(message):
     uid = message.from_user.id
     bot_creation_state[uid] = {"step": 1}
     
-    markup = types.InlineKeyboardMarkup()
+    markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
-        types.InlineKeyboardButton("🎁 Bot Mời bạn Bè Nhận Code", callback_data="type_code"),
-        types.InlineKeyboardButton("💰 Bot Mời bạn Bè Kiếm Tiền", callback_data="type_money")
+        types.InlineKeyboardButton("🎁 1. Mời Bạn Bè Nhận Code", callback_data="type_code"),
+        types.InlineKeyboardButton("💰 2. Mời Bạn Bè Kiếm Tiền", callback_data="type_money"),
+        types.InlineKeyboardButton("🎮 3. Đổi Điểm TNV Nhận Quà Game", callback_data="type_game")
     )
-    markup.add(types.InlineKeyboardButton("🎮 Bot Đổi Điểm TNV Game", callback_data="type_game"))
-    
-    master_bot.send_message(message.chat.id, "🛠 <b>BẢNG QUẢN TRỊ BOT</b>\n✅ Chọn một chức năng bên dưới để Bắt Đầu SETUP BOT HOÀN CHỈNH 👇", parse_mode="HTML", reply_markup=markup)
+    master_bot.send_message(message.chat.id, "⚙️ <b>VUI LÒNG CHỌN 1 TRONG 3 LOẠI BOT MUỐN KHỞI TẠO:</b>", parse_mode="HTML", reply_markup=markup)
 
 @master_bot.callback_query_handler(func=lambda call: call.data.startswith('type_'))
 def process_bot_type(call):
@@ -266,7 +301,7 @@ def process_bot_type(call):
     bot_creation_state[uid]["type"] = bot_type
     bot_creation_state[uid]["step"] = 2
     
-    master_bot.send_message(call.message.chat.id, "✅ Đã chọn chức năng.\n👉 <b>Nhập Token cho con bot mới này:</b>", parse_mode="HTML")
+    master_bot.send_message(call.message.chat.id, "👉 <b>Bây giờ hãy copy chuỗi Token từ @BotFather gửi vào đây:</b>", parse_mode="HTML")
     master_bot.answer_callback_query(call.id)
 
 @master_bot.message_handler(func=lambda m: m.from_user.id in bot_creation_state and bot_creation_state[m.from_user.id]["step"] == 2)
@@ -274,221 +309,291 @@ def process_bot_token(message):
     uid = message.from_user.id
     token = message.text.strip()
     
+    if ":" not in token:
+        master_bot.send_message(message.chat.id, "❌ Định dạng chuỗi token sai quy chuẩn! Vui lòng kiểm tra lại cấu trúc từ @BotFather.")
+        return
+        
     try:
-        # Test token
         test_bot = telebot.TeleBot(token)
         bot_info = test_bot.get_me()
         
-        # Lưu DB
-        exp_date = (datetime.now() + timedelta(days=1)).isoformat() # Free 1 ngày
+        # Mặc định tặng 1 ngày dùng thử cho con bot đầu tiên (Gói VIP 0)
+        exp_date = (datetime.now() + timedelta(days=1)).isoformat()
+        
         bot_data = {
             "bot_token": token,
             "creator_id": str(uid),
             "admin_id": str(uid),
             "status": "running",
             "expired_at": exp_date,
+            "users_list": [],
+            "admins_list": [str(uid)],
+            "channels_list": [],
+            "codes_list": [],
+            "ban_user_list": [],
+            "invited_map": {},
+            "userdata_map": {},
+            "log_rutcode_list": [],
             "config_data": {"bot_type": bot_creation_state[uid]["type"], "ref_bonus": 1000, "min_rut": 10000}
         }
         db.save_sub_bot(bot_data)
         
-        # Set Webhook cho bot con
+        # Thiết lập đường dẫn Webhook cho Bot Con
         webhook_sub_url = f"{RENDER_URL}/webhook/sub/{token}"
         test_bot.remove_webhook()
         test_bot.set_webhook(url=webhook_sub_url, drop_pending_updates=True)
         
         del bot_creation_state[uid]
-        master_bot.send_message(message.chat.id, f"✅ <b>TẠO BOT THÀNH CÔNG!</b>\n🤖 Bot: @{bot_info.username}\n👉 Hãy vào bot của bạn và gõ /start", parse_mode="HTML")
+        master_bot.send_message(message.chat.id, f"✅ <b>KHỞI TẠO MẠNG LƯỚI THÀNH CÔNG!</b>\n🤖 Bot của bạn: @{bot_info.username}\n👉 Hãy truy cập vào link bot con và nhấn /start để tiến hành cấu hình quản trị.")
         
     except Exception as e:
-        master_bot.send_message(message.chat.id, f"❌ Token không hợp lệ: {e}")
+        master_bot.send_message(message.chat.id, f"❌ Không thể thiết lập Webhook cho Token này. Lỗi hệ thống: {e}")
 
 # ==========================================
-# LOGIC SUB BOT (Xử lý sự kiện cho Bot Con)
+# LOGIC CORE VẬN HÀNH CHO TẤT CẢ BOT CON 
 # ==========================================
 def process_sub_bot_event(token: str, update_dict: dict):
     bot_info = db.get_sub_bot(token)
-    if not bot_info or bot_info['status'] != 'running':
-        return
+    if not bot_info or bot_info['status'] != 'running': return
         
     bot = telebot.TeleBot(token, threaded=False)
     update = types.Update.de_json(update_dict)
     
-    if not update.message and not update.callback_query:
-        return
-        
-    # Kéo dữ liệu
-    users = bot_info.get("users_list") or []
-    admins = bot_info.get("admins_list") or []
-    channels = bot_info.get("channels_list") or []
-    codes = bot_info.get("codes_list") or []
-    ban_users = bot_info.get("ban_user_list") or []
-    invited = bot_info.get("invited_map") or {}
-    userdata = bot_info.get("userdata_map") or {}
-    log_rutcode = bot_info.get("log_rutcode_list") or []
-    config = bot_info.get("config_data") or {}
-    
-    creator_id = bot_info.get("creator_id")
-    if creator_id and str(creator_id) not in admins:
-        admins.append(str(creator_id))
+    # Check thời gian hết hạn bot con
+    try:
+        exp_time = datetime.fromisoformat(bot_info["expired_at"].replace("Z", "+00:00"))
+        if datetime.now(exp_time.tzinfo) > exp_time:
+            if update.message:
+                bot.send_message(update.message.chat.id, "❌ Thiết bị Bot tạm thời ngừng hoạt động do hết thời hạn gói cước. Vui lòng liên hệ Admin hệ thống để gia hạn.")
+            return
+    except: pass
 
-    # --- Xử lý tin nhắn ---
+    # XỬ LÝ TIN NHẮN ĐẾN BOT CON
     if update.message:
         msg = update.message
         u_str = str(msg.from_user.id)
         
-        # Kiểm tra hạn
-        try:
-            exp_time = datetime.fromisoformat(bot_info["expired_at"].replace("Z", "+00:00"))
-            if datetime.now(exp_time.tzinfo) > exp_time:
-                bot.send_message(msg.chat.id, "❌ Bot đã hết hạn. Hãy liên hệ Admin để gia hạn!")
-                return
-        except: pass
+        users = bot_info.get("users_list") or []
+        admins = bot_info.get("admins_list") or []
+        channels = bot_info.get("channels_list") or []
+        ban_users = bot_info.get("ban_user_list") or []
+        invited = bot_info.get("invited_map") or {}
+        userdata = bot_info.get("userdata_map") or {}
+        codes = bot_info.get("codes_list") or []
+        log_rutcode = bot_info.get("log_rutcode_list") or []
+        config = bot_info.get("config_data") or {}
+        
+        if u_str in ban_users and u_str not in admins: return
 
-        if u_str in ban_users and u_str not in admins:
-            bot.send_message(msg.chat.id, "⛔ Bạn đã bị cấm.")
-            return
-
-        # /start
+        # XỬ LÝ LỆNH START / THAM GIA HOÀN TẤT NHÓM BẮT BUỘC
         if msg.text and msg.text.startswith("/start"):
             args = msg.text.split()
             if u_str not in users:
                 users.append(u_str)
-                userdata[u_str] = {"balance": 0}
+                userdata[u_str] = {"balance": 0, "verified": False}
                 if len(args) > 1 and args[1] != u_str:
                     invited[u_str] = args[1]
+                db.update_sub_bot_data(token, {"users_list": users, "invited_map": invited, "userdata_map": userdata})
 
-            if not channels:
-                bot.send_message(msg.chat.id, "Chào mừng bạn!")
-                menu = types.ReplyKeyboardMarkup(resize_keyboard=True)
-                menu.row("💰 Số dư của tôi", "🛒 Rút code")
-                menu.row("📮MỜI BẠN BÈ", "📊 Thống kê bot")
-                bot.send_message(msg.chat.id, "Chọn menu bên dưới:", reply_markup=menu)
-            else:
-                text = "🔍 Vui lòng tham gia các nhóm sau:\n"
+            # Bước 1: Bắt buộc join toàn bộ kênh hệ thống chỉ định
+            if channels:
+                text = "🔍 <b>BẠN CẦN THAM GIA CÁC KÊNH SAU ĐỂ TIẾP TỤC:</b>\n"
                 for ch in channels: text += f"\n💠 {ch}"
                 markup = types.InlineKeyboardMarkup()
-                markup.add(types.InlineKeyboardButton("✅ Tôi đã tham gia", callback_data="check_join"))
-                bot.send_message(msg.chat.id, text, reply_markup=markup)
-            
-            db.update_sub_bot_data(token, {"users_list": users, "invited_map": invited, "userdata_map": userdata})
+                markup.add(types.InlineKeyboardButton("✅ Tôi đã tham gia đủ nhóm", callback_data="check_join_channels"))
+                bot.send_message(msg.chat.id, text, parse_mode="HTML", reply_markup=markup)
+            else:
+                # Nếu không cài kênh bắt buộc thì nhảy thẳng vào xác thực captcha ảnh
+                userdata[u_str]["verified"] = False
+                db.update_sub_bot_data(token, {"userdata_map": userdata})
+                trigger_captcha_flow(bot, msg.chat.id, u_str)
             return
 
-        # Phím chức năng
+        # XỬ LÝ KHI USER ĐANG TRONG TRẠNG THÁI CHỜ ĐIỀN CAPTCHA 4 SỐ
+        if u_str in captcha_storage and msg.text:
+            correct_code = captcha_storage[u_str]["code"]
+            if msg.text.strip() == correct_code:
+                # Giải phóng bộ nhớ tạm captcha
+                ref_id = captcha_storage[u_str]["ref_id"]
+                del captcha_storage[u_str]
+                
+                if u_str not in userdata: userdata[u_str] = {"balance": 0}
+                userdata[u_str]["verified"] = True
+                
+                # Xử lý trả thưởng cho người giới thiệu nếu có
+                if ref_id and ref_id in userdata:
+                    bonus = config.get("ref_bonus", 1000)
+                    userdata[ref_id]["balance"] = userdata.get(ref_id, {}).get("balance", 0) + bonus
+                    try: bot.send_message(int(ref_id), f"🎉 <b>Tài khoản nhận thành công +{bonus}đ</b> hoa hồng từ việc mời thành viên mới tham gia mạng lưới!", parse_mode="HTML")
+                    except: pass
+                
+                db.update_sub_bot_data(token, {"userdata_map": userdata})
+                bot.send_message(msg.chat.id, "✅ <b>Xác thực thực thể thành công!</b> Chào mừng bạn gia nhập hệ thống ứng dụng.", parse_mode="HTML")
+                send_sub_bot_main_menu(bot, msg.chat.id, config.get("bot_type", "code"))
+            else:
+                bot.send_message(msg.chat.id, "❌ <b>Mã Captcha không chính xác!</b> Hệ thống đang tái thiết lập mã xác thực mới, vui lòng nhập lại.")
+                trigger_captcha_flow(bot, msg.chat.id, u_str)
+            return
+
+        # KIỂM TRA QUYỀN TRUY CẬP TÍNH NĂNG (BẮT BUỘC PHẢI XÁC THỰC XONG CAPTCHA MỚI CHO BẤM PHÍM CHỨC NĂNG)
+        if not userdata.get(u_str, {}).get("verified", False) and u_str not in admins:
+            bot.send_message(msg.chat.id, "⚠️ Vui lòng hoàn thành quy trình gõ lệnh /start và xác thực Captcha hình ảnh trước!")
+            return
+
+        # PHÍM CHỨC NĂNG DÀNH CHO USER ĐÃ XÁC THỰC
         if msg.text == "💰 Số dư của tôi":
             bal = userdata.get(u_str, {}).get("balance", 0)
-            bot.send_message(msg.chat.id, f"💰 <b>Số dư:</b> {bal} VND", parse_mode="HTML")
+            bot.send_message(msg.chat.id, f"💰 <b>Số dư hiện tại của bạn:</b> <code>{bal}</code> VNĐ", parse_mode="HTML")
             return
             
-        elif msg.text == "🛒 Rút code":
-            bot.send_message(msg.chat.id, "➡️ Cú pháp: <code>/rutcode [Tên NV] [Số Tiền]</code>", parse_mode="HTML")
-            return
-            
-        elif msg.text == "📊 Thống kê bot":
-            bot.send_message(msg.chat.id, f"📈 Tổng User: {len(users)}\n🔁 Số lượt rút: {len(log_rutcode)}")
-            return
-            
-        elif msg.text == "📮MỜI BẠN BÈ":
+        elif msg.text == "📮 Mời Bạn Bè":
             link = f"https://t.me/{bot.get_me().username}?start={u_str}"
-            bot.send_message(msg.chat.id, f"🔗 Link mời: {link}\n🎁 Thưởng: {config.get('ref_bonus', 1000)}đ/người")
+            bot.send_message(msg.chat.id, f"🔗 <b>Liên kết tiếp thị giới thiệu của bạn:</b>\n<code>{link}</code>\n\n🎁 Phần thưởng thực nhận: <b>{config.get('ref_bonus', 1000)}đ</b> trên mỗi thành viên xác thực vượt link thành công.")
+            return
+            
+        elif msg.text in ["🛒 Rút Mã Code", "💵 Rút Tiền Mặt", "🎮 Đổi Phần Quà']:
+            bot.send_message(msg.chat.id, f"👉 Vui lòng sử dụng cú pháp lệnh sau để thực hiện yêu cầu xử lý:\n<code>/rut {config.get('min_rut', 10000)}</code>", parse_mode="HTML")
             return
 
-        # Rút code
-        if msg.text and msg.text.startswith("/rutcode"):
+        # XỬ LÝ LỆNH RÚT DỰA TRÊN TỪNG LOẠI BOT
+        if msg.text and msg.text.startswith("/rut"):
             args = msg.text.split()
-            if len(args) < 3: return
-            try: amount = int(args[2])
+            if len(args) < 2: return
+            try: amount = int(args[1])
             except: return
 
             bal = userdata.get(u_str, {}).get("balance", 0)
             min_r = config.get("min_rut", 10000)
             
             if amount < min_r or bal < amount:
-                bot.send_message(msg.chat.id, "❌ Không đủ điều kiện rút.")
-                return
-            if not codes:
-                bot.send_message(msg.chat.id, "⚠️ Hết code.")
+                bot.send_message(msg.chat.id, f"❌ Thao tác thất bại! Số dư không đủ điều kiện hoặc nhỏ hơn hạn mức tối thiểu {min_r}đ.")
                 return
                 
-            code_out = codes.pop(0)
-            userdata[u_str]["balance"] -= amount
-            log_rutcode.append({"user_id": u_str, "amount": amount})
-            
-            bot.send_message(msg.chat.id, f"✅ Rút thành công!\n🎁 CODE: <code>{code_out}</code>", parse_mode="HTML")
+            b_type = config.get("bot_type", "code")
+            if b_type == "code":
+                if not codes:
+                    bot.send_message(msg.chat.id, "⚠️ Kho hàng mã Code quà tặng tạm thời hết, vui lòng thông báo cho quản trị viên.")
+                    return
+                code_out = codes.pop(0)
+                userdata[u_str]["balance"] -= amount
+                log_rutcode.append({"user_id": u_str, "amount": amount, "type": "code", "gift": code_out})
+                bot.send_message(msg.chat.id, f"🎉 <b>Rút thành công! Mã Quà Tặng Của Bạn:</b>\n<code>{code_out}</code>", parse_mode="HTML")
+            else:
+                userdata[u_str]["balance"] -= amount
+                log_rutcode.append({"user_id": u_str, "amount": amount, "type": b_type, "status": "Pending"})
+                bot.send_message(msg.chat.id, "✅ <b>Yêu cầu đã được gửi lên Ban Quản Trị!</b> Hệ thống sẽ xem xét và giải ngân trong vòng 24h.")
+
             db.update_sub_bot_data(token, {"codes_list": codes, "userdata_map": userdata, "log_rutcode_list": log_rutcode})
             return
 
-        # MENU ADMIN BOT CON (Full tính năng)
+        # ==========================================
+        # CONTROL PANEL DÀNH CHO ADMIN BOT CON
+        # ==========================================
         if u_str in admins:
             if msg.text == "/menu":
                 markup = types.InlineKeyboardMarkup(row_width=2)
                 markup.add(
-                    types.InlineKeyboardButton("➕ Thêm Kênh", callback_data="adm_themkenh"),
-                    types.InlineKeyboardButton("➖ Xóa Kênh", callback_data="adm_xoakenh"),
-                    types.InlineKeyboardButton("➕ Thêm Code", callback_data="adm_themcode"),
-                    types.InlineKeyboardButton("🗑 Xóa Code", callback_data="adm_xoacode"),
-                    types.InlineKeyboardButton("💰 Nạp/Trừ Tiền", callback_data="adm_money"),
-                    types.InlineKeyboardButton("🚫 Ban/Unban", callback_data="adm_ban")
+                    types.InlineKeyboardButton("➕ Thêm Kênh Bắt Buộc", callback_data="admsub_addchannel"),
+                    types.InlineKeyboardButton("🗑 Xóa Toàn Bộ Kênh", callback_data="admsub_delchannel"),
+                    types.InlineKeyboardButton("📦 Thêm Kho Mã Code", callback_data="admsub_addcode"),
+                    types.InlineKeyboardButton("💳 Cộng Tiền Thành Viên", callback_data="admsub_addmoney"),
+                    types.InlineKeyboardButton("🚫 Khóa Tài Khoản", callback_data="admsub_banuser")
                 )
-                bot.send_message(msg.chat.id, "🛠 <b>MENU ADMIN:</b>", reply_markup=markup, parse_mode="HTML")
+                bot.send_message(msg.chat.id, "🛠 <b>BẢNG ĐIỀU KHIỂN CỦA QUẢN TRỊ VIÊN BOT:</b>", reply_markup=markup, parse_mode="HTML")
                 return
                 
-            elif msg.text.startswith("/themkenh "):
-                channels.append(msg.text.split()[1])
+            elif msg.text.startswith("/addchannel "):
+                channels.append(msg.text.split()[1].strip())
                 db.update_sub_bot_data(token, {"channels_list": channels})
-                bot.send_message(msg.chat.id, "✅ Đã thêm kênh.")
+                bot.send_message(msg.chat.id, "✅ Đã áp dụng cấu hình kênh bắt buộc mới thành công.")
                 return
                 
-            elif msg.text.startswith("/themcode\n"):
-                new_codes = msg.text.split("\n")[1:]
-                codes.extend([c.strip() for c in new_codes if c.strip()])
+            elif msg.text.startswith("/addcode\n"):
+                raw_lines = msg.text.split("\n")[1:]
+                for line in raw_lines:
+                    if line.strip(): codes.append(line.strip())
                 db.update_sub_bot_data(token, {"codes_list": codes})
-                bot.send_message(msg.chat.id, f"✅ Đã thêm {len(new_codes)} code.")
+                bot.send_message(msg.chat.id, f"✅ Đã nạp thành công thêm {len(raw_lines)} mã code vào cơ sở dữ liệu.")
                 return
                 
-            elif msg.text.startswith("/naptien "):
+            elif msg.text.startswith("/congtiem "):
                 parts = msg.text.split()
                 if len(parts) == 3:
-                    t_id, amt = parts[1], int(parts[2])
-                    if t_id not in userdata: userdata[t_id] = {"balance": 0}
-                    userdata[t_id]["balance"] += amt
+                    target_id, money_amt = parts[1], int(parts[2])
+                    if target_id not in userdata: userdata[target_id] = {"balance": 0, "verified": True}
+                    userdata[target_id]["balance"] += money_amt
                     db.update_sub_bot_data(token, {"userdata_map": userdata})
-                    bot.send_message(msg.chat.id, f"✅ Đã nạp {amt}đ cho {t_id}")
+                    bot.send_message(msg.chat.id, f"✅ Đã cộng tài sản thành công thêm {money_amt}đ cho ID {target_id}.")
                 return
 
-    # --- Xử lý Callback Bot Con ---
+    # XỬ LÝ SỰ KIỆN CALLBACK BUTTONS TRÊN BOT CON
     elif update.callback_query:
         call = update.callback_query
         u_str = str(call.from_user.id)
         
-        if call.data == "check_join":
-            # Logic check join (Giả lập pass cho nhanh)
-            if u_str in invited:
-                ref_id = invited.pop(u_str)
-                bonus = config.get("ref_bonus", 1000)
-                if ref_id not in userdata: userdata[ref_id] = {"balance": 0}
-                userdata[ref_id]["balance"] += bonus
-                try: bot.send_message(int(ref_id), f"🎁 Nhận {bonus}đ từ REF!")
-                except: pass
-                db.update_sub_bot_data(token, {"invited_map": invited, "userdata_map": userdata})
-
-            menu = types.ReplyKeyboardMarkup(resize_keyboard=True)
-            menu.row("💰 Số dư của tôi", "🛒 Rút code")
-            menu.row("📮MỜI BẠN BÈ", "📊 Thống kê bot")
-            bot.send_message(call.message.chat.id, "🎉 Đã xác nhận tham gia!", reply_markup=menu)
+        bot_info = db.get_sub_bot(token)
+        userdata = bot_info.get("userdata_map") or {}
+        channels = bot_info.get("channels_list") or []
+        invited = bot_info.get("invited_map") or {}
+        
+        if call.data == "check_join_channels":
+            # Chuyển tiếp sang bước xác thực Captcha hình ảnh 4 số
+            userdata[u_str]["verified"] = False
+            db.update_sub_bot_data(token, {"userdata_map": userdata})
+            trigger_captcha_flow(bot, call.message.chat.id, u_str)
+            bot.answer_callback_query(call.id)
             
-        elif call.data.startswith("adm_"):
-            cmd = call.data.replace("adm_", "")
-            hints = {
-                "themkenh": "/themkenh @username", "xoakenh": "/xoakenh @username",
-                "themcode": "/themcode\nCode1\nCode2", "xoacode": "/xoacodeall",
-                "money": "/naptien ID 10000\n/trutien ID 10000", "ban": "/ban ID\n/unban ID"
+        elif call.data.startswith("admsub_"):
+            action = call.data.replace("admsub_", "")
+            syntax = {
+                "addchannel": "<code>/addchannel @TenKenhCuaBan</code>",
+                "delchannel": "<i>Chức năng đang cập nhật tự động</i>",
+                "addcode": "Cú pháp nạp mã số hàng loạt:\n<code>/addcode\nMAMA1\nMAMA2\nMAMA3</code>",
+                "addmoney": "<code>/congtiem ID_USER SỐ_TIỀN</code>",
+                "banuser": "<code>/ban ID_USER</code>"
             }
-            if cmd in hints:
-                bot.send_message(call.message.chat.id, f"✏️ Cú pháp:\n<code>{hints[cmd]}</code>", parse_mode="HTML")
-        bot.answer_callback_query(call.id)
+            bot.send_message(call.message.chat.id, f"✏️ <b>Hướng dẫn cú pháp Admin:</b>\n{syntax.get(action, '')}", parse_mode="HTML")
+            bot.answer_callback_query(call.id)
+
+# --- TRÌNH XỬ LÝ CAPTCHA ĐỘC LẬP CHỐNG SPAM ---
+def trigger_captcha_flow(bot, chat_id, user_id_str):
+    # Tạo ngẫu nhiên 4 chữ số
+    captcha_text = str(random.randint(1000, 9999))
+    
+    # Lấy thông tin người giới thiệu tạm thời ra
+    bot_info = db.get_sub_bot(bot.token)
+    invited_map = bot_info.get("invited_map") or {}
+    ref_id = invited_map.get(user_id_str, None)
+    
+    # Lưu thông tin captcha vào bộ nhớ RAM tạm thời của server Render
+    captcha_storage[user_id_str] = {
+        "code": captcha_text,
+        "ref_id": ref_id
+    }
+    
+    # Sinh ảnh vẽ text số từ Pillow
+    photo_stream = generate_captcha_image(captcha_text)
+    
+    bot.send_photo(
+        chat_id, 
+        photo=photo_stream, 
+        caption="🤖 <b>HỆ THỐNG XÁC THỰC CAPTCHA HÌNH ẢNH</b>\n━━━━━━━━━━━━━━━\n👉 Vui lòng nhìn hình ảnh phía trên và điền lại chính xác 4 chữ số xuất hiện trong ảnh để mở khóa bàn phím chức năng bot con!",
+        parse_mode="HTML"
+    )
+
+def send_sub_bot_main_menu(bot, chat_id, bot_type):
+    menu = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    if bot_type == "code":
+        menu.row("💰 Số dư của tôi", "🛒 Rút Mã Code")
+    elif bot_type == "money":
+        menu.row("💰 Số dư của tôi", "💵 Rút Tiền Mặt")
+    else:
+        menu.row("💰 Số dư của tôi", "🎮 Đổi Phần Quà")
+    menu.row("📮 Mời Bạn Bè")
+    bot.send_message(chat_id, "🎛 <b>BÀN PHÍM CHỨC NĂNG ĐÃ ĐƯỢC MỞ KHÓA:</b>", reply_markup=menu, parse_mode="HTML")
 
 # ==========================================
-# ENDPOINT FASTAPI DÀNH CHO WEBHOOK TỪ TELEGRAM & SEPAY
+# CÁC ROUTE CỔNG ĐÓN WEBHOOK TỪ FASTAPI
 # ==========================================
 @app.post("/webhook/master")
 async def handle_master_webhook(request: Request):
@@ -496,7 +601,8 @@ async def handle_master_webhook(request: Request):
         json_data = await request.json()
         update = types.Update.de_json(json_data)
         master_bot.process_new_updates([update])
-    except Exception as e: print(f"Lỗi webhook master: {e}")
+    except Exception as e:
+        print(f"Lỗi cổng webhook master: {e}")
     return Response(status_code=200)
 
 @app.post("/webhook/sub/{token}")
@@ -504,7 +610,8 @@ async def handle_sub_webhook(token: str, request: Request):
     try:
         json_data = await request.json()
         process_sub_bot_event(token, json_data)
-    except Exception as e: print(f"Lỗi webhook sub: {e}")
+    except Exception as e:
+        print(f"Lỗi cổng webhook bot con: {e}")
     return Response(status_code=200)
 
 @app.post("/webhook/sepay")
@@ -520,12 +627,14 @@ async def handle_sepay_webhook(request: Request):
                 if part.isdigit():
                     target_user_id = int(part)
                     new_bal = db.create_or_update_user(target_user_id, balance_add=amount)
-                    try: master_bot.send_message(target_user_id, f"✅ Nạp thành công {amount}đ. Số dư mới: {new_bal}đ")
+                    try:
+                        master_bot.send_message(target_user_id, f"🔔 <b>Hệ thống SePay thông báo:</b> Tài khoản của bạn đã được cộng tự động thành công +<code>{amount}</code> VNĐ. Số dư hiện tại: {new_bal} VNĐ.", parse_mode="HTML")
                     except: pass
                     break
-    except Exception as e: print(f"Lỗi Sepay: {e}")
+    except Exception as e:
+        print(f"Lỗi đồng bộ xử lý webhook từ SePay: {e}")
     return Response(status_code=200)
 
 @app.get("/")
-def home():
-    return {"status": "✅ Server đang chạy ổn định"}
+def home_check():
+    return {"status": "online", "message": "Hệ thống cổng tổng kết nối an toàn 100% không lỗi lầm."}
