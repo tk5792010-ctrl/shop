@@ -3,3 +3,4 @@ uvicorn
 pyTelegramBotAPI
 supabase
 python-dotenv
+pillow
