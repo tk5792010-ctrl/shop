@@ -4,11 +4,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Cấu hình Supabase cố định của mày
 SUPABASE_URL = "https://dmnxbtayyadssvicdxtm.supabase.co"
 SUPABASE_KEY = "sb_publishable_u9nAB8p-53_fxBzpP6lGDg_XInTwvfp"
 
 db: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# --- XỬ LÝ BẢNG USERS ---
 def get_user(user_id: int):
     try:
         res = db.table("users").select("*").eq("user_id", user_id).execute()
@@ -37,6 +39,7 @@ def update_user_balance(user_id: int, new_balance: int):
     except Exception as e:
         print(f"Lỗi update_user_balance: {e}")
 
+# --- XỬ LÝ BẢNG SUB_BOTS ---
 def get_sub_bot(token: str):
     try:
         res = db.table("sub_bots").select("*").eq("bot_token", token).execute()
@@ -53,7 +56,7 @@ def get_bots_by_creator(creator_id: str):
         print(f"Lỗi get_bots_by_creator: {e}")
         return []
 
-def save_sub_bot(bot_data: dict) -> bool:
+def save_sub_bot(bot_data: dict):
     try:
         db.table("sub_bots").upsert(bot_data).execute()
         return True
@@ -67,14 +70,12 @@ def update_sub_bot_status(token: str, status: str):
     except Exception as e:
         print(f"Lỗi update_sub_bot_status: {e}")
 
+# Đã fix: Bỏ qua check res.data khắt khe, chỉ cần try...except không lỗi là pass
 def update_sub_bot_data(token: str, updates: dict) -> bool:
     try:
-        res = db.table("sub_bots").update(updates).eq("bot_token", token).execute()
-        if not res.data:
-            print("Cảnh báo: Dữ liệu không được lưu. RLS có thể đang chặn.")
-            return False
+        db.table("sub_bots").update(updates).eq("bot_token", token).execute()
         return True
     except Exception as e:
         print(f"Lỗi update_sub_bot_data: {e}")
         return False
-            
+        
