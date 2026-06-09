@@ -1,462 +1,503 @@
+import asyncio
 import os
-import time
-import sqlite3
-import telebot
-from telebot import types
-from flask import Flask, request, jsonify
-from threading import Thread
+import json
+import sys
+from datetime import datetime, timedelta
+from fastapi import FastAPI, Request, Response
+from aiogram import Bot, Dispatcher, Router, F
+from aiogram.types import Message, Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from supabase import create_client, Client
 
-# ==========================================
-# CẤU HÌNH CẤU HÌNH HỆ THỐNG (THAY ĐỔI TẠI ĐÂY)
-# ==========================================
-BOT_TOKEN = "8654764187:AAGSqHRK59Ood6Z32KktLOpiytlZgWbD24E"  # Lấy từ @BotFather
-ADMIN_ID = 7816353760             # ID Telegram của bạn (Kiểu số)
-API_API_KEY_SEPAY = "8EX4HZHKG6C17JMLLHTBKVNJC7GPUSVBVEYWAUQLWGR2R0BM6WOPDSO53MBQFWNX" # Dùng để xác thực webhook nếu cần
+# --- CẤU HÌNH HỆ THỐNG ---
+RENDER_URL = "https://shop-ws1s.onrender.com"  # Thay đổi thành URL Render của bạn
+MASTER_TOKEN = "8848756408:AAEAcpMvrbihm2n7LMN-nKC-UtKGd2Dgm4g" # Token Bot Cha
+SUPABASE_URL = "https://dmnxbtayyadssvicdxtm.supabase.co"
+SUPABASE_KEY = "sb_publishable_u9nAB8p-53_fxBzpP6lGDg_XInTwvfp"
 
-# Khởi tạo Bot và Flask App (Dùng cho Webhook & Keep-alive)
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
-app = Flask(__name__)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+app = FastAPI()
 
-# ==========================================
-# KHỞI TẠO DATABASE (SQLite)
-# ==========================================
-def init_db():
-    conn = sqlite3.connect("shop_game.db")
-    cursor = conn.cursor()
-    # Bảng người dùng
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users (
-                        user_id INTEGER PRIMARY KEY,
-                        username TEXT,
-                        balance INTEGER DEFAULT 0,
-                        total_deposit INTEGER DEFAULT 0)''')
-    # Bảng danh mục game
-    cursor.execute('''CREATE TABLE IF NOT EXISTS categories (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        name TEXT UNIQUE)''')
-    # Bảng lưu trữ Code Game
-    cursor.execute('''CREATE TABLE IF NOT EXISTS game_codes (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        category_id INTEGER,
-                        code_value TEXT,
-                        price INTEGER,
-                        status TEXT DEFAULT 'CON_HANG',
-                        FOREIGN KEY(category_id) REFERENCES categories(id))''')
-    # Bảng lịch sử hóa đơn nạp tiền
-    cursor.execute('''CREATE TABLE IF NOT EXISTS invoices (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        user_id INTEGER,
-                        amount INTEGER,
-                        code_transaction TEXT UNIQUE,
-                        status TEXT DEFAULT 'PENDING',
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    conn.commit()
-    conn.close()
+master_bot = Bot(token=MASTER_TOKEN)
+dp = Dispatcher()
 
-init_db()
+class BotCreation(StatesGroup):
+    waiting_for_type = State()
+    waiting_for_name = State()
+    waiting_for_admin_id = State()
+    waiting_for_token = State()
 
-# ==========================================
-# CÁC HÀM TRỢ GIÚP DATABASE
-# ==========================================
-def get_user(user_id, username=""):
-    conn = sqlite3.connect("shop_game.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, username, balance, total_deposit FROM users WHERE user_id = ?", (user_id,))
-    user = cursor.fetchone()
-    if not user:
-        cursor.execute("INSERT INTO users (user_id, username, balance) VALUES (?, ?, ?)", (user_id, username, 0))
-        conn.commit()
-        user = (user_id, username, 0, 0)
-    conn.close()
-    return user
+# --- BÀN PHÍM ĐIỀU KHIỂN BOT CHA (GIỐNG VIDEO) ---
+main_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🆕 Tạo Bot"), KeyboardButton(text="▶️ Quản Lý Bot")],
+        [KeyboardButton(text="💥 Dịch Vụ MXH 💥"), KeyboardButton(text="💎 Mua Gói VIP")],
+        [KeyboardButton(text="💳 Nạp Tiền"), KeyboardButton(text="👤 Tài Khoản")]
+    ],
+    resize_keyboard=True
+)
 
-def update_balance(user_id, amount):
-    conn = sqlite3.connect("shop_game.db")
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET balance = balance + ?, total_deposit = total_deposit + ? WHERE user_id = ?", (amount, amount, user_id))
-    conn.commit()
-    conn.close()
+@app.on_event("startup")
+async def on_startup():
+    await master_bot.set_webhook(f"{RENDER_URL}/webhook/master")
 
-# ==========================================
-# GIAO DIỆN ĐẸP - MENU CHÍNH
-# ==========================================
-def main_menu_keyboard(user_id):
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_shop = types.InlineKeyboardButton("🛒 Mua Code Game", callback_data="menu_shop")
-    btn_profile = types.InlineKeyboardButton("👤 Tài Khoản", callback_data="menu_profile")
-    btn_deposit = types.InlineKeyboardButton("💳 Nạp Tiền Auto", callback_data="menu_deposit")
-    btn_support = types.InlineKeyboardButton("🤝 Hỗ Trợ / Contact", callback_data="menu_support")
-    
-    markup.add(btn_shop, btn_profile)
-    markup.add(btn_deposit, btn_support)
-    
-    if user_id == ADMIN_ID:
-        btn_admin = types.InlineKeyboardButton("👑 PANEL QUẢN TRỊ (ADMIN)", callback_data="admin_panel")
-        markup.add(btn_admin)
-    return markup
-
-@bot.message_handler(commands=['start', 'menu'])
-def send_welcome(message):
-    user_id = message.from_user.id
-    username = message.from_user.username or "Người dùng"
-    get_user(user_id, username) # Đảm bảo user có trong hệ thống
-    
-    welcome_text = (
-        f"🤖 <b>CHÀO MỪNG BẠN ĐẾN VỚI SHOP CODE GAME AUTO</b> 🤖\n"
-        f"──────────────────────────────\n"
-        f"🔥 Hệ thống phân phối Giftcode, Code Game tự động 24/7.\n"
-        f"⚡️ Nạp tiền qua <b>VPBank</b> tự động xử lý trong 30 giây.\n"
-        f"──────────────────────────────\n"
-        f"<i>Vui lòng chọn các tính năng bên dưới:</i>"
-    )
-    bot.send_message(user_id, welcome_text, reply_markup=main_menu_keyboard(user_id))
-
-# ==========================================
-# XỬ LÝ CALLBACK QUY TRÌNH MUA HÀNG & PROFILE
-# ==========================================
-@bot.callback_query_handler(func=lambda call: True)
-def handle_query(call):
-    user_id = call.from_user.id
-    data = call.data
-
-    # Quay lại menu chính
-    if data == "back_to_main":
-        bot.edit_message_text(
-            chat_id=user_id,
-            message_id=call.message.message_id,
-            text="🤖 <b>MENU CHÍNH - HỆ THỐNG SHOP CODE GAME</b>\nVui lòng chọn chức năng:",
-            reply_markup=main_menu_keyboard(user_id)
-        )
-    
-    # Xem thông tin tài khoản
-    elif data == "menu_profile":
-        _, username, balance, total_deposit = get_user(user_id)
-        profile_text = (
-            f"👤 <b>THÔNG TIN TÀI KHOẢN</b>\n"
-            f"──────────────────────────────\n"
-            f"🆔 ID Tài khoản: <code>{user_id}</code>\n"
-            f"📌 Username: @{username}\n"
-            f"💰 Số dư hiện tại: <b>{balance:,} VNĐ</b>\n"
-            f"📈 Tổng tiền đã nạp: <b>{total_deposit:,} VNĐ</b>\n"
-            f"──────────────────────────────"
-        )
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔙 Quay Lại", callback_data="back_to_main"))
-        bot.edit_message_text(chat_id=user_id, message_id=call.message.message_id, text=profile_text, reply_markup=markup)
-
-    # Xem Hướng dẫn nạp tiền
-    elif data == "menu_deposit":
-        deposit_text = (
-            f"💳 <b>HỆ THỐNG NẠP TIỀN TỰ ĐỘNG (VPBANK)</b>\n"
-            f"──────────────────────────────\n"
-            f"Bạn vui lòng chuyển khoản theo thông tin chính xác bên dưới:\n\n"
-            f"🏦 Ngân hàng: <b>VPBANK (Ngân hàng TMCP Việt Nam Thịnh Vượng)</b>\n"
-            f"🔢 Số tài khoản: <code>0336293609</code>\n" # Thay số tk của bạn vào đây nếu sepay lấy cấu hình từ tài khoản này
-            f"👤 Chủ tài khoản: <b>NGUYEN THANH HOP</b>\n"
-            f"📝 Nội dung chuyển khoản bắt buộc:\n"
-            f"👉 <code>NAP {user_id}</code>\n\n"
-            f"⚠️ <b>LƯU Ý:</b> Nhập đúng nội dung <code>NAP {user_id}</code> để hệ thống tự động cộng tiền sau 15-30 giây."
-        )
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔄 Kiểm tra số dư", callback_data="menu_profile"))
-        markup.add(types.InlineKeyboardButton("🔙 Quay Lại", callback_data="back_to_main"))
-        bot.edit_message_text(chat_id=user_id, message_id=call.message.message_id, text=deposit_text, reply_markup=markup)
-
-    # Hỗ trợ khách hàng
-    elif data == "menu_support":
-        support_text = (
-            f"🤝 <b>HỖ TRỢ & LIÊN HỆ KHÁCH HÀNG</b>\n"
-            f"──────────────────────────────\n"
-            f"Nếu gặp lỗi trong quá trình nạp tiền, mua sắm hoặc cần hợp tác, vui lòng liên hệ Admin:\n\n"
-            f"👤 <b>Admin Telegram:</b> @Tên_User_Admin_Của_Bạn\n"
-            f"⏰ Thời gian hỗ trợ: 08:00 - 23:00 hàng ngày.\n"
-            f"🔰 Uy tín - Chất lượng - An toàn."
-        )
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔙 Quay Lại", callback_data="back_to_main"))
-        bot.edit_message_text(chat_id=user_id, message_id=call.message.message_id, text=support_text, reply_markup=markup)
-
-    # Xem danh mục mua code game
-    elif data == "menu_shop":
-        conn = sqlite3.connect("shop_game.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM categories")
-        categories = cursor.fetchall()
-        conn.close()
-
-        if not categories:
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("🔙 Quay Lại", callback_data="back_to_main"))
-            bot.edit_message_text(chat_id=user_id, message_id=call.message.message_id, text="❌ Hiện tại shop chưa phân loại danh mục game nào!", reply_markup=markup)
-            return
-
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        for cat in categories:
-            # Đếm số lượng code còn hàng trong danh mục này
-            conn = sqlite3.connect("shop_game.db")
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM game_codes WHERE category_id = ? AND status = 'CON_HANG'", (cat[0],))
-            count = c.fetchone()[0]
-            conn.close()
-            
-            markup.add(types.InlineKeyboardButton(f"🎮 {cat[1]} ({count} mục)", callback_data=f"buy_cat_{cat[0]}"))
-        markup.add(types.InlineKeyboardButton("🔙 Quay Lại", callback_data="back_to_main"))
-        bot.edit_message_text(chat_id=user_id, message_id=call.message.message_id, text="🎮 <b>CHỌN DÒNG GAME BẠN MUỐN MUA CODE</b>", reply_markup=markup)
-
-    # Chọn một danh mục cụ thể
-    elif data.startswith("buy_cat_"):
-        cat_id = int(data.split("_")[2])
-        conn = sqlite3.connect("shop_game.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT price, COUNT(*) FROM game_codes WHERE category_id = ? AND status = 'CON_HANG' GROUP BY price", (cat_id,))
-        products = cursor.fetchall()
-        cursor.execute("SELECT name FROM categories WHERE id = ?", (cat_id,))
-        cat_name = cursor.fetchone()[0]
-        conn.close()
-
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        if not products:
-            markup.add(types.InlineKeyboardButton("🔙 Quay Lại", callback_data="menu_shop"))
-            bot.edit_message_text(chat_id=user_id, message_id=call.message.message_id, text=f"❌ Thể loại <b>{cat_name}</b> tạm thời hết hàng!", reply_markup=markup)
-            return
-
-        for prod in products:
-            price = prod[0]
-            stock = prod[1]
-            markup.add(types.InlineKeyboardButton(f"🛒 Loại Giá: {price:,} VNĐ (Còn: {stock})", callback_data=f"confirm_buy_{cat_id}_{price}"))
-        
-        markup.add(types.InlineKeyboardButton("🔙 Quay lại danh mục", callback_data="menu_shop"))
-        bot.edit_message_text(chat_id=user_id, message_id=call.message.message_id, text=f"🎮 Phân mục: <b>{cat_name}</b>\nVui lòng lựa chọn gói giá cần mua:", reply_markup=markup)
-
-    # Xác nhận mua code cụ thể
-    elif data.startswith("confirm_buy_"):
-        parts = data.split("_")
-        cat_id = int(parts[2])
-        price = int(parts[3])
-
-        _, _, balance, _ = get_user(user_id)
-        if balance < price:
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("💳 Nạp Tiền Ngay", callback_data="menu_deposit"))
-            markup.add(types.InlineKeyboardButton("🔙 Quay Lại", callback_data="menu_shop"))
-            bot.answer_callback_query(call.id, "❌ Tài khoản của bạn không đủ tiền!", show_alert=True)
-            return
-
-        # Thực hiện lấy code và trừ tiền an toàn bằng Transaction
-        conn = sqlite3.connect("shop_game.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, code_value FROM game_codes WHERE category_id = ? AND price = ? AND status = 'CON_HANG' LIMIT 1", (cat_id, price))
-        code_item = cursor.fetchone()
-
-        if not code_item:
-            conn.close()
-            bot.answer_callback_query(call.id, "❌ Rất tiếc, loại code này vừa mới hết hàng!", show_alert=True)
-            return
-
-        code_db_id, code_text = code_item
-        
-        try:
-            # Trừ tiền user
-            cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (price, user_id))
-            # Cập nhật trạng thái code đã bán
-            cursor.execute("UPDATE game_codes SET status = 'DA_BAN' WHERE id = ?", (code_db_id,))
-            conn.commit()
-            
-            # Gửi mã code cho khách hàng
-            success_msg = (
-                f"🎉 <b>MUA CODE THÀNH CÔNG!</b> 🎉\n"
-                f"──────────────────────────────\n"
-                f"💰 Giá tiền: <code>{price:,} VNĐ</code>\n"
-                f"🔑 ĐÂY LÀ MÃ CODE CỦA BẠN:\n\n"
-                f"👉 <code>{code_text}</code>\n\n"
-                f"<i>(Hãy click trực tiếp vào mã code ở trên để tự động Copy)</i>\n"
-                f"──────────────────────────────\n"
-                f"Cảm ơn bạn đã ủng hộ dịch vụ của chúng tôi!"
-            )
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("🔙 Tiếp tục mua sắm", callback_data="menu_shop"))
-            bot.edit_message_text(chat_id=user_id, message_id=call.message.message_id, text=success_msg, reply_markup=markup)
-            
-        except Exception as e:
-            conn.rollback()
-            bot.send_message(user_id, "❌ Có lỗi hệ thống xảy ra trong quá trình giao dịch. Vui lòng liên hệ Admin.")
-        finally:
-            conn.close()
-
-    # ==========================================
-    # CÁC CHỨC NĂNG ADMIN PANEL
-    # ==========================================
-    elif data == "admin_panel" and user_id == ADMIN_ID:
-        adm_text = (
-            f"👑 <b>HỆ THỐNG QUẢN TRỊ ADMIN PANEL</b> 👑\n"
-            f"──────────────────────────────\n"
-            f"Dưới đây là các lệnh thao tác nhanh cấu hình dữ liệu shop:"
-        )
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            types.InlineKeyboardButton("➕ Thêm Thể Loại Game Mới", callback_data="adm_add_cat"),
-            types.InlineKeyboardButton("📥 Up Thêm Code Game Mới", callback_data="adm_add_code"),
-            types.InlineKeyboardButton("🔙 Thoát Admin", callback_data="back_to_main")
-        )
-        bot.edit_message_text(chat_id=user_id, message_id=call.message.message_id, text=adm_text, reply_markup=markup)
-
-    elif data == "adm_add_cat" and user_id == ADMIN_ID:
-        msg = bot.send_message(user_id, "⌨️ Nhập <b>Tên Thể Loại Game Mới</b> muốn thêm (Ví dụ: <i>Liên Quân Mobile, Roblox, Free Fire</i>):")
-        bot.register_next_step_handler(msg, process_add_category)
-
-    elif data == "adm_add_code" and user_id == ADMIN_ID:
-        conn = sqlite3.connect("shop_game.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM categories")
-        cats = cursor.fetchall()
-        conn.close()
-        
-        if not cats:
-            bot.send_message(user_id, "❌ Hãy tạo ít nhất một Thể loại Game trước khi Up code!")
-            return
-            
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        for c in cats:
-            markup.add(types.InlineKeyboardButton(c[1], callback_data=f"adm_selectcat_{c[0]}"))
-        bot.edit_message_text(chat_id=user_id, message_id=call.message.message_id, text="🎮 Chọn thể loại game bạn muốn nạp code vào:", reply_markup=markup)
-
-    elif data.startswith("adm_selectcat_") and user_id == ADMIN_ID:
-        cat_id = int(data.split("_")[2])
-        msg = bot.send_message(user_id, "⌨️ Vui lòng nhập thông tin theo cấu trúc:\n<code>MệnhGiá|MãMãCode</code>\n\nVí dụ:\n<code>20000|GIFTCODE-LIENQUAN-VIP999</code>")
-        bot.register_next_step_handler(msg, lambda m: process_up_code(m, cat_id))
-
-# ==========================================
-# CÁC HÀM XỬ LÝ NHẬP LIỆU PHÍA ADMIN
-# ==========================================
-def process_add_category(message):
-    if message.text.startswith("/"): return
-    cat_name = message.text.strip()
+# --- WEBHOOK SEPAY (NẠP TIỀN TỰ ĐỘNG) ---
+@app.post("/webhook/sepay")
+async def sepay_webhook(request: Request):
+    data = await request.json()
+    content = data.get("content", "")
+    amount = int(data.get("transferAmount", 0))
     try:
-        conn = sqlite3.connect("shop_game.db")
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO categories (name) VALUES (?)", (cat_name,))
-        conn.commit()
-        conn.close()
-        bot.send_message(message.chat.id, f"✅ Đã thêm thành công thể loại game: <b>{cat_name}</b>", reply_markup=main_menu_keyboard(ADMIN_ID))
-    except sqlite3.IntegrityError:
-        bot.send_message(message.chat.id, "❌ Tên thể loại này đã tồn tại sẵn trong hệ thống.")
+        parts = content.split()
+        user_id = None
+        for part in parts:
+            if part.isdigit():
+                user_id = int(part)
+                break
+        if user_id:
+            user = supabase.table("users").select("*").eq("user_id", user_id).execute()
+            if user.data:
+                new_balance = user.data[0]["balance"] + amount
+                supabase.table("users").update({"balance": new_balance}).eq("user_id", user_id).execute()
+                await master_bot.send_message(user_id, f"💳 **Nạp tiền thành công!**\n💰 Số tiền: +{amount:,} VNĐ\n💵 Số dư hiện tại: {new_balance:,} VNĐ")
+                return {"status": "success"}
+    except Exception as e:
+        print(f"Lỗi SePay: {e}")
+    return {"status": "failed"}
 
-def process_up_code(message, cat_id):
-    if message.text.startswith("/"): return
-    text = message.text.strip()
-    if "|" not in text:
-        bot.send_message(message.chat.id, "❌ Nhập sai định dạng rồi! Vui lòng làm lại và sử dụng dấu gạch đứng | để phân tách.")
+@app.post("/webhook/master")
+async def master_webhook(request: Request):
+    update = Update.model_validate(await request.json(), context={"bot": master_bot})
+    await dp.feed_update(master_bot, update)
+    return Response(status_code=200)
+
+# --- XỬ LÝ WEBHOOK CHO TẤT CẢ BOT CON ---
+@app.post("/webhook/sub/{token}")
+async def sub_webhook(token: str, request: Request):
+    try:
+        bot_res = supabase.table("sub_bots").select("*").eq("bot_token", token).execute()
+        if not bot_res.data:
+            return Response(status_code=404)
+        
+        bot_info = bot_res.data[0]
+        expired_at = datetime.fromisoformat(bot_info['expired_at'].replace('z', '+00:00'))
+        if datetime.now(expired_at.tzinfo) > expired_at:
+            supabase.table("sub_bots").update({"status": "expired"}).eq("bot_token", token).execute()
+            sub_bot = Bot(token=token)
+            await sub_bot.send_message(bot_info['admin_id'], "⚠️ Bot của bạn đã hết hạn dùng thử 2 ngày! Vui lòng gia hạn gói VIP tại Bot Cha.")
+            return Response(status_code=200)
+
+        update_data = await request.json()
+        await process_sub_bot_full_logic(token, bot_info, update_data)
+        return Response(status_code=200)
+    except Exception as e:
+        print(f"Lỗi hệ thống bot con {token[:10]}: {e}")
+        return Response(status_code=500)
+
+# =========================================================================
+# XỬ LÝ 100% LOGIC BẢN GỐC 456HIT.PY SANG WEBHOOK (KHÔNG CẮT GIẢM LỆNH NÀO)
+# =========================================================================
+async def process_sub_bot_full_logic(token: str, bot_info: dict, update_data: dict):
+    bot = Bot(token=token)
+    update = Update.model_validate(update_data, context={"bot": bot})
+    
+    # Xử lý nút bấm Callback Quy Trình Kiểm Tra Nhóm
+    if update.callback_query:
+        call = update.callback_query
+        user_id = str(call.from_user.id)
+        
+        channels = json.loads(bot_info['channels_list'])
+        config = json.loads(bot_info['config_data'])
+        invited = json.loads(bot_info['invited_map'])
+        userdata = json.loads(bot_info['userdata_map'])
+        
+        if call.data == "check_join":
+            not_joined = []
+            for ch in channels:
+                try:
+                    member = await bot.get_chat_member(ch, int(user_id))
+                    if member.status in ['left', 'kicked']:
+                        not_joined.append(ch)
+                except:
+                    not_joined.append(ch)
+            
+            if not_joined:
+                msg = "❌ Bạn chưa tham gia các kênh sau:\n" + "\n".join(f"💠 {ch}" for ch in not_joined)
+                await bot.send_message(call.message.chat.id, msg)
+                return
+            
+            # Cộng thưởng giới thiệu nếu có trong map trung gian
+            referrer = invited.pop(user_id, None)
+            if referrer:
+                ref_bonus = config.get("ref_bonus", 1)
+                if referrer not in userdata:
+                    userdata[referrer] = {"balance": 0}
+                userdata[referrer]["balance"] += ref_bonus
+                try:
+                    await bot.send_message(int(referrer), f"🎁 BẠN NHẬN {ref_bonus}đ TỪ LƯỢT GIỚI THIỆU {user_id}!")
+                except:
+                    pass
+            
+            # Lưu lại trạng thái DB
+            supabase.table("sub_bots").update({
+                "invited_map": json.dumps(invited),
+                "userdata_map": json.dumps(userdata)
+            }).eq("bot_token", token).execute()
+            
+            # Mở phím menu chính của con bot
+            menu = ReplyKeyboardMarkup(keyboard=[
+                [KeyboardButton(text="💰 Số dư của tôi")],
+                [KeyboardButton(text="🛒 Rút code"), KeyboardButton(text="📮MỜI BẠN BÈ")],
+                [KeyboardButton(text="📄 Link Game"), KeyboardButton(text="📊 Thống kê bot")]
+            ], resize_keyboard=True)
+            await bot.send_message(call.message.chat.id, "✅ Vui lòng thả cảm xúc!3 bài gần nhất để được ưu tiên @ChiaSeKinhNghiemGame!", reply_markup=menu)
+            return
+
+        # Xử lý các Callback từ nút bấm /menu ẩn của Admin con
+        elif call.data.startswith("admin_"):
+            command = call.data.replace("admin_", "")
+            admins = json.loads(bot_info['admins_list'])
+            if user_id not in admins and int(user_id) != bot_info['admin_id']:
+                return
+            
+            commands_map = {
+                "themkenh": "/themkenh @tenkenh", "xoakenh": "/xoakenh @tenkenh",
+                "themadmin": "/themadmin user_id", "xoaadmin": "/xoaadmin user_id", "dsadmin": "/dsadmin",
+                "themcode": "/themcode (gửi danh sách code theo dòng)", "xoacode": "/xoacode MÃ_CODE",
+                "xoacodeall": "/xoacodeall", "dscode": "/dscode", "checkcode": "/checkcode",
+                "naptien": "/naptien user_id số_tiền", "trutien": "/trutien user_id số_tiền",
+                "thuongmoiban": "/thuongmoiban số_tiền", "minrut": "/minrut số_tiền",
+                "uplink": "/uplink LINK", "ban": "/ban user_id", "unban": "/unban user_id",
+                "dsban": "/dsban", "thong_bao": "/thongbao nội dung", "chat_user": "/chat ID nội dung"
+            }
+            if command in commands_map:
+                await bot.send_message(call.message.chat.id, f"✏️ Gõ lệnh: `{commands_map[command]}`", parse_mode="Markdown")
+            return
+
+    if not update.message or not update.message.text:
         return
+
+    message = update.message
+    text = message.text
+    user_id = message.from_user.id
+    str_user_id = str(user_id)
+    
+    # Khôi phục toàn bộ các mảng dữ liệu mô phỏng file txt/json của bot con
+    users = json.loads(bot_info['users_list'])
+    admins = json.loads(bot_info['admins_list'])
+    channels = json.loads(bot_info['channels_list'])
+    codes = json.loads(bot_info['codes_list'])
+    ban_users = json.loads(bot_info['ban_user_list'])
+    invited = json.loads(bot_info['invited_map'])
+    userdata = json.loads(bot_info['userdata_map'])
+    log_rutcode = json.loads(bot_info['log_rutcode_list'])
+    config = json.loads(bot_info['config_data'])
+    
+    # Định nghĩa hàm kiểm tra quyền Admin nhanh dựa trên danh sách nạp vào DB
+    def check_is_admin(uid):
+        return str(uid) in admins or int(uid) == bot_info['admin_id']
+
+    if str_user_id in ban_users:
+        await message.answer("Bạn đã bị cấm sử dụng bot.")
+        return
+
+    # LỆNH /start GỐC
+    if text.startswith("/start"):
+        args = text.split()
+        if str_user_id not in users:
+            users.append(str_user_id)
+            userdata[str_user_id] = {"balance": 0}
+            if len(args) > 1 and args[1] != str_user_id:
+                invited[str_user_id] = args[1]
+            
+            supabase.table("sub_bots").update({
+                "users_list": json.dumps(users),
+                "userdata_map": json.dumps(userdata),
+                "invited_map": json.dumps(invited)
+            }).eq("bot_token", token).execute()
+
+        if not channels:
+            await message.answer("Hiện tại chưa có kênh nào để tham gia.")
+            return
+
+        txt = "🔍 Vui lòng vào tất cả các nhóm sau để sử dụng bot\n"
+        for ch in channels:
+            txt += f"\n💠 {ch}"
+        
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Tôi đã tham gia", callback_data="check_join")]])
+        await message.answer(txt, reply_markup=markup)
+        return
+
+    # SỐ DƯ CỦA TÔI GỐC
+    elif text == "💰 Số dư của tôi":
+        balance = userdata.get(str_user_id, {}).get("balance", 0)
+        await message.answer(f"💰 Số dư của bạn\n─────\n✨ Hiện tại: {balance} VND\n👉 Mời bạn bè để nhận thêm ngẫu nhiên {config.get('ref_bonus', 1)} VND mỗi người!", parse_mode='Markdown')
+
+    # MỜI BẠN BÈ GỐC
+    elif text == "📮MỜI BẠN BÈ":
+        bot_me = await bot.get_me()
+        invite_link = f"https://t.me/{bot_me.username}?start={user_id}"
+        caption = f"<b>🔍 LINK GIỚI THIỆU CỦA BẠN: </b> <code>{invite_link}</code>\n\n<b>🔻 MỜI 1 BẠN = {config.get('ref_bonus', 1)} VNĐ</b>\n<b>🤝 ĐIỂM TỐI THIỂU GIAO DỊCH: {config.get('min_rut', 1000)} VNĐ</b>"
+        share_url = f"https://t.me/share/url?url={invite_link}&text=Tham gia bot nhận quà: {invite_link}"
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📤 Chia sẻ vào nhóm", url=share_url)]])
+        
+        if config.get("invite_image"):
+            await bot.send_photo(message.chat.id, photo=config["invite_image"], caption=caption, parse_mode="HTML", reply_markup=markup)
+        else:
+            await message.answer(caption, parse_mode="HTML", reply_markup=markup)
+
+    # RÚT CODE NÚT GIAO DIỆN PHÍM CƠ
+    elif text == "🛒 Rút code":
+        await message.answer("Hướng Dẫn Thực Hiện:\n─────\n➡️/rutcode [ID TELE OR TNV]  [ SỐ TIỀN ]\nVD  /rutcode xuanson 1000")
+
+    # LỆNH /rutcode GỐC CHẠY CHÍNH XÁC LOGIC TRỪ TIỀN
+    elif text.startswith("/rutcode"):
+        args = text.split()
+        if len(args) < 3:
+            await message.answer("Dùng: /rutcode <ghi_chú> <số_tiền>")
+            return
+        note = args[1]
+        try:
+            amount = int(args[2])
+        except:
+            await message.answer("Số tiền không hợp lệ.")
+            return
+
+        balance = userdata.get(str_user_id, {}).get("balance", 0)
+        min_rut = config.get("min_rut", 1000)
+
+        if amount < min_rut:
+            await message.answer(f"Số tiền rút tối thiểu là {min_rut}đ.")
+            return
+        if balance < amount:
+            await message.answer(f"Bạn không đủ số dư để rút {amount}đ.")
+            return
+        if not codes:
+            await message.answer("⚠️ Hiện tại không còn code nào.")
+            return
+
+        code = codes.pop(0)
+        userdata[str_user_id]["balance"] -= amount
+        log_entry = {"user_id": str_user_id, "amount": amount}
+        log_rutcode.append(log_entry)
+
+        supabase.table("sub_bots").update({
+            "codes_list": json.dumps(codes),
+            "userdata_map": json.dumps(userdata),
+            "log_rutcode_list": json.dumps(log_rutcode)
+        }).eq("bot_token", token).execute()
+
+        await message.answer(f"📤 Rút Thành Công {note} \n\n 💵SỐ TIỀN: {amount} VNDD\n CODE: {code}")
+        
+        # Bắn báo cáo về nhóm Admin hoặc Admin gốc
+        try:
+            await bot.send_message(bot_info['admin_id'], f"Yêu cầu rút từ @{message.from_user.username} \n(🆔: {user_id})\n\n-TÊN NHÂN VẬT: {note}\n-Số tiền: {amount} VND.\n-CODE: {code}")
+        except:
+            pass
+
+    # LINK GAME PHÍM CƠ GỐC
+    elif text == "📄 Link Game":
+        link = config.get("game_link")
+        if link:
+            markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎮 VÔ NGAY", url=link)]])
+            await message.answer(f"🎮 *Link Game Chính Thức:*\n[{link}]({link})", parse_mode='Markdown', reply_markup=markup)
+        else:
+            await message.answer("Hiện chưa có link game nào được cập nhật.")
+
+    # THỐNG KÊ BOT PHÍM CƠ GỐC
+    elif text == "📊 Thống kê bot":
+        total_users = len(users)
+        total_rut = len(log_rutcode)
+        total_amount = sum(log.get("amount", 0) for log in log_rutcode)
+        await message.answer(f"📈<b> Thống kê bot</b>\n─────\n👥 Tổng số user: <b>{total_users}</b>\n🔁 Tổng số lượt rút: <b>{total_rut}</b>\n💸 Tổng tiền đã rút: <b>{total_amount}VND</b>", parse_mode="HTML")
+
+    # =========================================================================
+    # HỆ THỐNG TOÀN BỘ CÁC LỆNH ADMIN CON KHÔNG THAY ĐỔI
+    # =========================================================================
+    elif text == "/menu" and check_is_admin(user_id):
+        markup = InlineKeyboardMarkup(row_width=2, inline_keyboard=[
+            [InlineKeyboardButton(text="➕ /themkenh", callback_data="admin_themkenh"), InlineKeyboardButton(text="➖ /xoakenh", callback_data="admin_xoakenh")],
+            [InlineKeyboardButton(text="👤 /themadmin", callback_data="admin_themadmin"), InlineKeyboardButton(text="❌ /xoaadmin", callback_data="admin_xoaadmin")],
+            [InlineKeyboardButton(text="📋 /dsadmin", callback_data="admin_dsadmin"), InlineKeyboardButton(text="➕ /themcode", callback_data="admin_themcode")],
+            [InlineKeyboardButton(text="🗑️ /xoacode", callback_data="admin_xoacode"), InlineKeyboardButton(text="🔥 /xoacodeall", callback_data="admin_xoacodeall")],
+            [InlineKeyboardButton(text="📄 /dscode", callback_data="admin_dscode"), InlineKeyboardButton(text="🔍 /checkcode", callback_data="admin_checkcode")],
+            [InlineKeyboardButton(text="➕ /naptien", callback_data="admin_naptien"), InlineKeyboardButton(text="➖ /trutien", callback_data="admin_trutien")],
+            [InlineKeyboardButton(text="🎁 /thuongmoiban", callback_data="admin_thuongmoiban"), InlineKeyboardButton(text="💰 /minrut", callback_data="admin_minrut")],
+            [InlineKeyboardButton(text="🔗 /uplink", callback_data="admin_uplink"), InlineKeyboardButton(text="🚫 /ban", callback_data="admin_ban")],
+            [InlineKeyboardButton(text="✅ /unban", callback_data="admin_unban"), InlineKeyboardButton(text="📃 /dsban", callback_data="admin_dsban")]
+        ])
+        await message.answer("📋 <b>Menu quản trị:</b>\nChọn thao tác bên dưới:", reply_markup=markup, parse_mode="HTML")
+
+    elif text.startswith("/themkenh") and check_is_admin(user_id):
+        args = text.split()
+        if len(args) >= 2:
+            chat_id = args[1]
+            if chat_id not in channels:
+                channels.append(chat_id)
+                supabase.table("sub_bots").update({"channels_list": json.dumps(channels)}).eq("bot_token", token).execute()
+                await message.answer(f"Đã thêm kênh: {chat_id}")
+
+    elif text.startswith("/xoakenh") and check_is_admin(user_id):
+        args = text.split()
+        if len(args) >= 2:
+            chat_id = args[1]
+            if chat_id in channels:
+                channels.remove(chat_id)
+                supabase.table("sub_bots").update({"channels_list": json.dumps(channels)}).eq("bot_token", token).execute()
+                await message.answer(f"Đã xoá kênh: {chat_id}")
+
+    elif text.startswith("/themcode") and check_is_admin(user_id):
+        lines = text.split('\n')
+        if len(lines) >= 2:
+            new_arr = [line.strip() for line in lines[1:] if line.strip() and line.strip() not in codes]
+            codes.extend(new_arr)
+            supabase.table("sub_bots").update({"codes_list": json.dumps(codes)}).eq("bot_token", token).execute()
+            await message.answer(f"Đã thêm {len(new_arr)} code mới.")
+
+    elif text == "/xoacodeall" and check_is_admin(user_id):
+        supabase.table("sub_bots").update({"codes_list": "[]"}).eq("bot_token", token).execute()
+        await message.answer("🗑️ Đã xóa toàn bộ mã code.")
+
+    elif text == "/dscode" and check_is_admin(user_id):
+        if not codes: await message.answer("✅ Danh sách code đang trống.")
+        else: await message.answer("📄 Danh sách code:\n\n" + "\n".join(codes))
+
+    elif text == "/checkcode" and check_is_admin(user_id):
+        await message.answer(f"✅Tổng số code còn lại: {len(codes)}")
+
+    elif text.startswith("/minrut") and check_is_admin(user_id):
+        config["min_rut"] = int(text.split()[1])
+        supabase.table("sub_bots").update({"config_data": json.dumps(config)}).eq("bot_token", token).execute()
+        await message.answer(f"✅ Đã cập nhật min_rut = {config['min_rut']}đ")
+
+    elif text.startswith("/thuongmoiban") and check_is_admin(user_id):
+        config["ref_bonus"] = int(text.split()[1])
+        supabase.table("sub_bots").update({"config_data": json.dumps(config)}).eq("bot_token", token).execute()
+        await message.answer(f"✅ Đã cập nhật tiền thưởng mời bạn = {config['ref_bonus']}đ")
+
+    elif text.startswith("/uplink") and check_is_admin(user_id):
+        config["game_link"] = text.split()[1].strip()
+        supabase.table("sub_bots").update({"config_data": json.dumps(config)}).eq("bot_token", token).execute()
+        await message.answer(f"Đã cập nhật link game:\n{config['game_link']}")
+
+    elif text.startswith("/ban") and check_is_admin(user_id):
+        ban_id = text.split()[1].strip()
+        if ban_id not in ban_users:
+            ban_users.append(ban_id)
+            supabase.table("sub_bots").update({"ban_user_list": json.dumps(ban_users)}).eq("bot_token", token).execute()
+            await message.answer(f"Đã ban user ID {ban_id}.")
+
+    elif text.startswith("/unban") and check_is_admin(user_id):
+        unban_id = text.split()[1].strip()
+        if unban_id in ban_users:
+            ban_users.remove(unban_id)
+            supabase.table("sub_bots").update({"ban_user_list": json.dumps(ban_users)}).eq("bot_token", token).execute()
+            await message.answer(f"✅ Đã gỡ ban người dùng ID {unban_id}.")
+
+    elif text.startswith("/naptien") and check_is_admin(user_id):
+        _, target_id, amount = text.strip().split()
+        if target_id not in userdata: userdata[target_id] = {"balance": 0}
+        userdata[target_id]["balance"] += int(amount)
+        supabase.table("sub_bots").update({"userdata_map": json.dumps(userdata)}).eq("bot_token", token).execute()
+        await message.answer(f"✅ Đã nạp {amount}đ cho ID {target_id}.")
+
+    elif text.startswith("/trutien") and check_is_admin(user_id):
+        _, target_id, amount = text.strip().split()
+        if target_id in userdata and userdata[target_id]["balance"] >= int(amount):
+            userdata[target_id]["balance"] -= int(amount)
+            supabase.table("sub_bots").update({"userdata_map": json.dumps(userdata)}).eq("bot_token", token).execute()
+            await message.answer(f"✅ Đã trừ {amount}đ của ID {target_id}.")
+
+    elif text.startswith("/themadmin") and check_is_admin(user_id):
+        new_admin = text.split()[1].strip()
+        if new_admin not in admins:
+            admins.append(new_admin)
+            supabase.table("sub_bots").update({"admins_list": json.dumps(admins)}).eq("bot_token", token).execute()
+            await message.answer(f"Đã thêm admin mới: {new_admin}")
+
+    elif text.startswith("/xoaadmin") and check_is_admin(user_id):
+        remove_id = text.split()[1].strip()
+        if remove_id in admins:
+            admins.remove(remove_id)
+            supabase.table("sub_bots").update({"admins_list": json.dumps(admins)}).eq("bot_token", token).execute()
+            await message.answer(f"Đã xoá admin: {remove_id}")
+
+    elif text == "/dsadmin" and check_is_admin(user_id):
+        await message.answer(f"✅<b>Danh sách admin:</b>\n" + "\n".join(admins), parse_mode="HTML")
+
+    elif text.startswith("/thongbao") and check_is_admin(user_id):
+        content = text.split(" ", 1)[1]
+        for uid in users:
+            try: await bot.send_message(int(uid), content)
+            except: continue
+        await message.answer("✅ Đã gửi thông báo đến toàn bộ user thành công.")
+
+    elif text.startswith("/chat") and check_is_admin(user_id):
+        _, target_id, content = text.split(" ", 2)
+        try:
+            await bot.send_message(int(target_id), content)
+            await message.answer("✅ Đã gửi tin nhắn.")
+        except Exception as e:
+            await message.answer(f"Lỗi: {e}")
+
+# =========================================================================
+# QUY TRÌNH LUỒNG TẠO BOT CỦA BOT CHA (MASTER BOT)
+# =========================================================================
+@dp.message(F.text == "🆕 Tạo Bot")
+async def init_create_bot(message: Message, state: FSMContext):
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 Bot Mời Bạn Bè Nhận Code", callback_data="type_bot_code")]
+    ])
+    await message.answer("🤖 Vui lòng chọn loại Bot bạn muốn khởi tạo:", reply_markup=markup)
+    await state.set_state(BotCreation.waiting_for_type)
+
+@dp.callback_query(BotCreation.waiting_for_type)
+async def process_type(call: InlineKeyboardMarkup, state: FSMContext):
+    await state.update_data(bot_type=call.data)
+    await call.message.answer("✍️ Nhập Tên CON BOT Nhé:\n*(Ví dụ: Bot Phát Code)*", parse_mode="Markdown")
+    await state.set_state(BotCreation.waiting_for_name)
+
+@dp.message(BotCreation.waiting_for_name)
+async def process_name(message: Message, state: FSMContext):
+    await state.update_data(bot_name=message.text)
+    await message.answer("🆔 Nhập Admin ID (ID Telegram người quản lý bot này):")
+    await state.set_state(BotCreation.waiting_for_admin_id)
+
+@dp.message(BotCreation.waiting_for_admin_id)
+async def process_admin_id(message: Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("❌ ID phải là số. Nhập lại:")
+        return
+    await state.update_data(admin_id=int(message.text))
+    await message.answer("🔑 Vui lòng gửi Token Bot lấy từ @BotFather:")
+    await state.set_state(BotCreation.waiting_for_token)
+
+@dp.message(BotCreation.waiting_for_token)
+async def process_token(message: Message, state: FSMContext):
+    token = message.text.strip()
+    user_data = await state.get_data()
+    user_id = message.from_user.id
     
     try:
-        price_str, code_val = text.split("|", 1)
-        price = int(price_str.strip())
-        code_val = code_val.strip()
+        test_bot = Bot(token=token)
+        await test_bot.get_me()
+        await test_bot.set_webhook(f"{RENDER_URL}/webhook/sub/{token}")
         
-        conn = sqlite3.connect("shop_game.db")
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO game_codes (category_id, code_value, price) VALUES (?, ?, ?)", (cat_id, code_val, price))
-        conn.commit()
-        conn.close()
+        # Thiết lập thời gian thử nghiệm đúng chuẩn 2 ngày miễn phí
+        expired_trial = datetime.now() + timedelta(days=2)
         
-        bot.send_message(message.chat.id, f"✅ Thêm code thành công!\n💰 Mệnh giá bán: {price:,} VNĐ\n🔑 Code: <code>{code_val}</code>", reply_markup=main_menu_keyboard(ADMIN_ID))
-    except ValueError:
-        bot.send_message(message.chat.id, "❌ Mệnh giá tiền phải là số nguyên dương hợp lệ!")
-
-# ==========================================
-# WEBHOOK SEPAY - AUTO NẠP TIỀN VPBANK
-# ==========================================
-@app.route('/sepay-webhook', methods=['POST'])
-def sepay_webhook():
-    data = request.json
-    if not data:
-        return jsonify({"status": "error", "message": "No data received"}), 400
-    
-    # Lấy các thông số SePay gửi sang khi có giao dịch chuyển khoản mới
-    content = data.get('code')            # Nội dung chuyển khoản thực tế
-    amount = data.get('transferAmount')    # Số tiền khách chuyển khoản (Kiểu số)
-    transaction_id = data.get('id')        # Mã giao dịch duy nhất của SePay
-
-    if not content or not amount:
-        return jsonify({"status": "error", "message": "Missing arguments"}), 200
-
-    # Phân tích nội dung chuyển khoản "NAP XXXXXXX"
-    content = content.strip().upper()
-    if content.startswith("NAP"):
-        try:
-            parts = content.split(" ")
-            if len(parts) >= 2:
-                user_id = int(parts[1]) # Lấy ID người dùng từ nội dung chuyển tiền
-                
-                # Thực hiện cộng tiền vào Database của user đó
-                conn = sqlite3.connect("shop_game.db")
-                cursor = conn.cursor()
-                
-                # Kiểm tra trùng lặp giao dịch (đề phòng gửi trùng webhook)
-                cursor.execute("SELECT id FROM invoices WHERE code_transaction = ?", (str(transaction_id),))
-                if cursor.fetchone():
-                    conn.close()
-                    return jsonify({"status": "success", "message": "Transaction already processed"}), 200
-                
-                # Kiểm tra user có tồn tại không
-                cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
-                if cursor.fetchone():
-                    # Thêm hóa đơn & cộng tiền tài khoản
-                    cursor.execute("INSERT INTO invoices (user_id, amount, code_transaction, status) VALUES (?, ?, ?, 'SUCCESS')", 
-                                   (user_id, amount, str(transaction_id)))
-                    cursor.execute("UPDATE users SET balance = balance + ?, total_deposit = total_deposit + ? WHERE user_id = ?", 
-                                   (amount, amount, user_id))
-                    conn.commit()
-                    conn.close()
-                    
-                    # Gửi tin nhắn thông báo tự động cho khách hàng qua Telegram bot
-                    deposit_alert = (
-                        f"💳 <b>THÔNG BÁO NẠP TIỀN THÀNH CÔNG!</b>\n"
-                        f"──────────────────────────────\n"
-                        f"💰 Hệ thống đã nhận: <b>+{amount:,} VNĐ</b> từ ngân hàng VPBank.\n"
-                        f"🆔 Mã giao dịch: <code>{transaction_id}</code>\n"
-                        f"⚡ Số dư của bạn đã được cập nhật tự động thành công!\n"
-                        f"🛒 Chúc bạn mua sắm vui vẻ."
-                    )
-                    bot.send_message(user_id, deposit_alert)
-                    
-                    # Thông báo cho Admin biết có người vừa nạp tiền
-                    bot.send_message(ADMIN_ID, f"👑 <b>Admin Alert:</b> User <code>{user_id}</code> vừa nạp <b>{amount:,} VNĐ</b> thành công!")
-                    return jsonify({"status": "success", "message": "Processed successfully"}), 200
-                else:
-                    conn.close()
-                    return jsonify({"status": "error", "message": "User not found"}), 200
-        except Exception as e:
-            print(f"Lỗi xử lý webhook: {str(e)}")
-            return jsonify({"status": "error", "message": "Internal error"}), 500
-
-    return jsonify({"status": "success", "message": "Content not matching format"}), 200
-
-# Route mặc định để Render check sống/chết web (UptimeRobot ping vào đây)
-@app.route('/')
-def home():
-    return "Bot Game is Running Live 24/7!", 200
-
-# ==========================================
-# CƠ CHẾ LIVE 24/7 VÀ CHẠY ĐỒNG THỜI BOT + WEB
-# ==========================================
-def run_flask():
-    # Render yêu cầu dùng PORT lấy từ môi trường hệ thống
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-
-def run_bot():
-    while True:
-        try:
-            print("Khởi chạy polling Telegram Bot...")
-            bot.infinity_polling(timeout=10, long_polling_timeout=5)
-        except Exception as e:
-            print(f"Lỗi Polling, khởi động lại sau 5 giây... Chi tiết lỗi: {e}")
-            time.sleep(5)
-
-if __name__ == "__main__":
-    # Luồng 1: Chạy Flask để hứng Webhook từ SePay và cổng Ping Sống
-    flask_thread = Thread(target=run_flask)
-    flask_thread.start()
-    
-    # Luồng 2: Chạy Polling nhận lệnh Telegram
-    run_bot()
+        supabase.table("sub_bots").insert({
+            "bot_token": token,
+            "creator_id": user_id,
+            "admin_id": user_data['admin_id'],
+            "bot_name": user_data['bot_name'],
+            "bot_type": user_data['bot_type'],
+            "status": "running",
+            "expired_at": expired_trial.isoformat()
+        }).execute()
+        
+        await message.answer(f"✅ Kết nối thành công!\n🤖 Bot **{user_data['bot_name']}** đã chạy trực tuyến.\n🎁 Nhận ngay **2 ngày thử nghiệm miễn phí**.\n📅 Hạn dùng: {expired_trial.strftime('%d/%m/%Y %H:%M')}", reply_markup=main_menu)
+        await state.clear()
+    except Exception as e:
+        await message.answer(f"❌ Khởi chạy thất bại: {e}")
