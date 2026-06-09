@@ -3,28 +3,29 @@ import json
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, Response
 import telebot
-from telebot import types
+from telebot import types  # Cứu cánh cho cái lỗi AttributeError hãm l**
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Cấu hình thông số môi trường bảo mật
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://dmnxbtayyadssvicdxtm.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "sb_publishable_u9nAB8p-53_fxBzpP6lGDg_XInTwvfp")
-MASTER_BOT_TOKEN = os.getenv("MASTER_BOT_TOKEN", "8848756408:AAEAcpMvrbihm2n7LMN-nKC-UtKGd2Dgm4g")
-RENDER_URL = os.getenv("RENDER_URL", "https://shop-ws1s.onrender.com")
+# ==========================================
+# CẤU HÌNH MÔI TRƯỜNG & DATABASE
+# ==========================================
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://your-project.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "your-anon-key")
+MASTER_BOT_TOKEN = os.getenv("MASTER_BOT_TOKEN", "8548769965:AAGiFT1QufOG4IBLgo0RjnRAMa0uM5ugCh8")
+RENDER_URL = os.getenv("RENDER_URL", "https://your-app.onrender.com")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
 
-# Khởi tạo instance cho Bot Cha điều phối hệ thống
+# Khởi tạo instance cho Bot Cha (Master Bot)
 master_bot = telebot.TeleBot(MASTER_BOT_TOKEN, threaded=False)
 
 # ==========================================
-# CÁC HÀM TIỆN ÍCH XỬ LÝ DỮ LIỆU TẬP TRUNG (SUPABASE JSONB)
+# CÁC HÀM TIỆN ÍCH XỬ LÝ DỮ LIỆU (SUPABASE)
 # ==========================================
-
 def get_bot_data(token: str):
     res = supabase.table("sub_bots").select("*").eq("bot_token", token).execute()
     if res.data:
@@ -43,16 +44,14 @@ def check_expired(bot_info: dict) -> bool:
 # ==========================================
 # LOGIC XỬ LÝ SỰ KIỆN CHO BOT CON (SUB-BOT)
 # ==========================================
-
 def process_sub_bot_event(token: str, update_dict: dict):
     bot_info = get_bot_data(token)
     if not bot_info:
         return
         
-    # Tạo instance cục bộ cho bot con đang gửi tín hiệu webhook
     bot = telebot.TeleBot(token, threaded=False)
     
-    # Ép kiểu dữ liệu JSONB sang mảng/mục từ điển Python
+    # Kéo data từ DB ra
     users = bot_info.get("users_list", [])
     admins = bot_info.get("admins_list", [])
     channels = bot_info.get("channels_list", [])
@@ -63,11 +62,11 @@ def process_sub_bot_event(token: str, update_dict: dict):
     log_rutcode = bot_info.get("log_rutcode_list", [])
     config = bot_info.get("config_data", {})
     
-    # Thêm ID người tạo bot vào danh sách admin hệ thống mặc định
     creator_id = bot_info.get("creator_id")
     if creator_id and creator_id not in admins:
         admins.append(creator_id)
 
+    # Đọc update từ webhook (Dùng types chuẩn)
     update = types.Update.de_json(update_dict)
     
     if update.message:
@@ -75,17 +74,17 @@ def process_sub_bot_event(token: str, update_dict: dict):
         user_id = msg.from_user.id
         u_str = str(user_id)
         
-        # Kiểm tra thời hạn hoạt động dùng thử 2 ngày của bot con
+        # Check hạn dùng thử
         if check_expired(bot_info):
             bot.send_message(msg.chat.id, "❌ Bot này đã hết hạn dùng thử 2 ngày. Vui lòng liên hệ Bot Cha để gia hạn!")
             return
 
-        # Kiểm tra trạng thái cấm người dùng truy cập bot
+        # Check ban
         if u_str in ban_users and not (user_id in admins):
             bot.send_message(msg.chat.id, "⛔ Bạn đã bị cấm sử dụng bot này.")
             return
 
-        # XỬ LÝ LỆNH /START
+        # Lệnh /start
         if msg.text and msg.text.startswith("/start"):
             args = msg.text.split()
             if u_str not in users:
@@ -94,7 +93,7 @@ def process_sub_bot_event(token: str, update_dict: dict):
                 if len(args) > 1:
                     ref = args[1]
                     if ref != u_str:
-                        invited[u_str] = ref # Lưu vết người giới thiệu
+                        invited[u_str] = ref
 
             if not channels:
                 bot.send_message(msg.chat.id, "Hiện tại hệ thống chưa thiết lập kênh bắt buộc tham gia.")
@@ -109,7 +108,9 @@ def process_sub_bot_event(token: str, update_dict: dict):
             save_bot_data(token, {"users_list": users, "invited_map": invited, "userdata_map": userdata})
             return
 
-        # XỬ LÝ THAO TÁC PHÍM CHỨC NĂNG MENU CHÍNH
+        # ==========================================
+        # PHÍM CHỨC NĂNG DÀNH CHO USER BÌNH THƯỜNG
+        # ==========================================
         if msg.text == "💰 Số dư của tôi":
             bal = userdata.get(u_str, {}).get("balance", 0)
             ref_b = config.get("ref_bonus", 1000)
@@ -151,13 +152,22 @@ def process_sub_bot_event(token: str, update_dict: dict):
                 bot.send_message(msg.chat.id, caption, parse_mode="HTML", reply_markup=markup)
             return
 
-        # LỆNH ĐIỀU HÀNH HỆ THỐNG /RUTCODE
+        # ==========================================
+        # XỬ LÝ RÚT CODE KIẾM TIỀN MMO
+        # ==========================================
         if msg.text and msg.text.startswith("/rutcode"):
             args = msg.text.split()
             if len(args) < 3:
                 bot.send_message(msg.chat.id, "Dùng đúng mẫu: /rutcode <tên_nhân_vật> <số_tiền>")
                 return
-            note, amount = args[1], int(args[2])
+            
+            note = args[1]
+            try:
+                amount = int(args[2])
+            except ValueError:
+                bot.send_message(msg.chat.id, "Số tiền phải là số nguyên.")
+                return
+
             bal = userdata.get(u_str, {}).get("balance", 0)
             
             if amount < config.get("min_rut", 10000):
@@ -176,7 +186,7 @@ def process_sub_bot_event(token: str, update_dict: dict):
             
             bot.send_message(msg.chat.id, f"📤 Rút Thành Công {note}\n\n💵 SỐ TIỀN: {amount} VND\nCODE: <code>{code_out}</code>", parse_mode="HTML")
             
-            # Gửi thông báo chuyển động số dư cho dàn quản trị viên
+            # Báo cho toàn bộ admin
             for adm in admins:
                 try:
                     bot.send_message(int(adm), f"🔔 Yêu cầu rút từ @{msg.from_user.username} (🆔: {u_str})\n- TNV: {note}\n- Số tiền: {amount} VND.\n- CODE: {code_out}")
@@ -185,7 +195,9 @@ def process_sub_bot_event(token: str, update_dict: dict):
             save_bot_data(token, {"codes_list": codes, "userdata_map": userdata, "log_rutcode_list": log_rutcode})
             return
 
-        # CÁC LỆNH QUẢN TRỊ VIÊN (ADMIN COMMANDS)
+        # ==========================================
+        # QUẢN TRỊ VIÊN CHO BOT CON
+        # ==========================================
         if user_id in admins:
             if msg.text.startswith("/menu"):
                 markup = types.InlineKeyboardMarkup(row_width=2)
@@ -215,6 +227,14 @@ def process_sub_bot_event(token: str, update_dict: dict):
                     bot.send_message(msg.chat.id, f"✅ Đã thêm kênh bắt buộc: {parts[1]}")
                 return
 
+            elif msg.text.startswith("/xoakenh"):
+                parts = msg.text.split()
+                if len(parts) > 1 and parts[1] in channels:
+                    channels.remove(parts[1])
+                    save_bot_data(token, {"channels_list": channels})
+                    bot.send_message(msg.chat.id, f"✅ Đã xóa kênh: {parts[1]}")
+                return
+
             elif msg.text.startswith("/themcode"):
                 lines = msg.text.split("\n")[1:]
                 added = 0
@@ -227,6 +247,12 @@ def process_sub_bot_event(token: str, update_dict: dict):
                 bot.send_message(msg.chat.id, f"✅ Thành công thêm {added} mã code vào hệ thống.")
                 return
 
+            elif msg.text.startswith("/xoacodeall"):
+                codes.clear()
+                save_bot_data(token, {"codes_list": codes})
+                bot.send_message(msg.chat.id, "✅ Đã xóa toàn bộ kho code.")
+                return
+
             elif msg.text.startswith("/naptien"):
                 parts = msg.text.split()
                 if len(parts) == 3:
@@ -235,6 +261,16 @@ def process_sub_bot_event(token: str, update_dict: dict):
                     userdata[t_id]["balance"] += amt
                     save_bot_data(token, {"userdata_map": userdata})
                     bot.send_message(msg.chat.id, f"✅ Đã nạp {amt}đ cho ID {t_id}.")
+                return
+
+            elif msg.text.startswith("/trutien"):
+                parts = msg.text.split()
+                if len(parts) == 3:
+                    t_id, amt = parts[1], int(parts[2])
+                    if t_id in userdata:
+                        userdata[t_id]["balance"] -= amt
+                        save_bot_data(token, {"userdata_map": userdata})
+                        bot.send_message(msg.chat.id, f"✅ Đã trừ {amt}đ của ID {t_id}.")
                 return
 
             elif msg.text.startswith("/ban"):
@@ -291,12 +327,16 @@ def process_sub_bot_event(token: str, update_dict: dict):
                 args = msg.text.split(" ", 1)
                 if len(args) == 2:
                     txt = args[1]
+                    success_count = 0
                     for u in users:
-                        try: bot.send_message(int(u), txt)
+                        try: 
+                            bot.send_message(int(u), txt)
+                            success_count += 1
                         except: pass
-                    bot.send_message(msg.chat.id, "📢 Đã phát thông báo toàn hệ thống.")
+                    bot.send_message(msg.chat.id, f"📢 Đã phát thông báo thành công tới {success_count} user.")
                 return
 
+    # Xử lý Callback (Nút bấm mượt mà)
     elif update.callback_query:
         call = update.callback_query
         u_str = str(call.from_user.id)
@@ -314,7 +354,6 @@ def process_sub_bot_event(token: str, update_dict: dict):
                 msg_err = "❌ Bạn chưa tham gia đủ các kênh:\n" + "\n".join(f"💠 {ch}" for ch in not_joined)
                 bot.send_message(call.message.chat.id, msg_err)
             else:
-                # Thực hiện cộng tiền thưởng giới thiệu nếu có
                 if u_str in invited:
                     ref_id = invited.pop(u_str)
                     bonus = config.get("ref_bonus", 1000)
@@ -347,13 +386,11 @@ def process_sub_bot_event(token: str, update_dict: dict):
             bot.answer_callback_query(call.id)
 
 # ==========================================
-# LOGIC HỆ THỐNG ĐIỀU PHỐI BOT CHA (MASTER BOT)
+# LOGIC HỆ THỐNG ĐIỀU PHỐI (MASTER BOT)
 # ==========================================
-
 @master_bot.message_handler(commands=['start'])
 def master_start(message):
     uid = message.from_user.id
-    # Lưu người dùng vào bảng users tổng
     supabase.table("users").upsert({"user_id": uid, "username": message.from_user.username}).execute()
     
     msg_welcome = (
@@ -380,14 +417,11 @@ def master_create_bot(message):
     sub_token = parts[1].strip()
     
     try:
-        # Kiểm tra tính hợp lệ của Token thông qua API Telegram trước khi gán Webhook
         test_bot = telebot.TeleBot(sub_token)
         bot_user = test_bot.get_me()
         
-        # Thiết lập thời gian hết hạn cố định dùng thử là 2 ngày
         exp_date = (datetime.now() + timedelta(days=2)).isoformat()
         
-        # Đồng bộ cấu hình tạo mới lên Supabase Database
         supabase.table("sub_bots").upsert({
             "bot_token": sub_token,
             "creator_id": uid,
@@ -396,7 +430,6 @@ def master_create_bot(message):
             "expired_at": exp_date
         }).execute()
         
-        # Gán Webhook chỉ định cổng tiếp nhận tín hiệu từ máy chủ Telegram về Render
         webhook_url = f"{RENDER_URL}/webhook/sub/{sub_token}"
         test_bot.remove_webhook()
         test_bot.set_webhook(url=webhook_url)
@@ -428,12 +461,10 @@ def master_status(message):
     master_bot.reply_to(message, txt, parse_mode="Markdown")
 
 # ==========================================
-# THIẾT LẬP ROUTING ENDPOINT (FASTAPI GATEWAY)
+# THIẾT LẬP ROUTING ENDPOINT (FASTAPI GATEWAY & SEPAY WEBHOOK)
 # ==========================================
-
 @app.post("/webhook/master")
 async def handle_master_webhook(request: Request):
-    """Tiếp nhận và xử lý dòng tín hiệu của Bot Cha"""
     json_data = await request.json()
     update = types.Update.de_json(json_data)
     master_bot.process_new_updates([update])
@@ -441,7 +472,6 @@ async def handle_master_webhook(request: Request):
 
 @app.post("/webhook/sub/{token}")
 async def handle_sub_webhook(token: str, request: Request):
-    """Hàm trung chuyển định tuyến tín hiệu Webhook cho toàn bộ dàn Bot Con"""
     json_data = await request.json()
     try:
         process_sub_bot_event(token, json_data)
@@ -451,26 +481,23 @@ async def handle_sub_webhook(token: str, request: Request):
 
 @app.post("/webhook/sepay")
 async def handle_sepay_webhook(request: Request):
-    """Cổng tự động nhận cổng thanh toán chuyển khoản SePay (MSB)"""
     data = await request.json()
-    
-    # Bóc tách chuỗi thông tin nội dung giao dịch (Ví dụ nội dung: NAP 6302038392)
     content = data.get("content", "")
     amount = int(data.get("amount", 0))
     
+    # Logic Auto Bank SePay
     if "NAP" in content.upper():
         try:
             parts = content.split()
-            target_user_id = int(parts[1])
+            target_user_id = int(parts[1])  # Ví dụ content: NAP 123456789
             
-            # Thực hiện cộng tiền trực tiếp vào tài khoản người dùng trên Supabase
             res = supabase.table("users").select("*").eq("user_id", target_user_id).execute()
             if res.data:
                 new_bal = res.data[0]["balance"] + amount
                 supabase.table("users").update({"balance": new_bal}).eq("user_id", target_user_id).execute()
                 
-                # Gửi tin nhắn thông báo tự động về máy chủ Telegram của khách hàng
-                try: master_bot.send_message(target_user_id, f"✅ Hệ thống đã nhận {amount}đ từ SePay. Số dư mới: {new_bal}đ")
+                try: 
+                    master_bot.send_message(target_user_id, f"✅ Hệ thống đã nhận {amount}đ từ Auto Bank. Số dư mới: {new_bal}đ")
                 except: pass
         except Exception as e:
             print(f"Lỗi xử lý cộng tiền Webhook SePay: {e}")
@@ -479,5 +506,4 @@ async def handle_sepay_webhook(request: Request):
 
 @app.get("/")
 def home():
-    """Hàm giữ môi trường Render Free luôn hoạt động, tránh trạng thái ngủ đông"""
-    return {"status": "Hệ thống máy chủ Multibot vận hành ổn định 24/7"}
+    return {"status": "Live", "message": "Hệ thống Automation đang chạy mượt 100%!"}
