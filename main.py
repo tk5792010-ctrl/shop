@@ -12,10 +12,10 @@ load_dotenv()
 # ==========================================
 # CẤU HÌNH MÔI TRƯỜNG & DATABASE
 # ==========================================
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://your-project.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "your-anon-key")
-MASTER_BOT_TOKEN = os.getenv("MASTER_BOT_TOKEN", "8548769965:AAGiFT1QufOG4IBLgo0RjnRAMa0uM5ugCh8")
-RENDER_URL = os.getenv("RENDER_URL", "https://your-app.onrender.com")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://dmnxbtayyadssvicdxtm.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "sb_publishable_u9nAB8p-53_fxBzpP6lGDg_XInTwvfp")
+MASTER_BOT_TOKEN = os.getenv("MASTER_BOT_TOKEN", "8848756408:AAEAcpMvrbihm2n7LMN-nKC-UtKGd2Dgm4g")
+RENDER_URL = os.getenv("RENDER_URL", "https://shop-ws1s.onrender.com")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
