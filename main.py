@@ -1,503 +1,483 @@
-import asyncio
 import os
 import json
-import sys
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, Response
-from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import Message, Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
+import telebot
+from telebot import types
 from supabase import create_client, Client
+from dotenv import load_dotenv
 
-# --- CẤU HÌNH HỆ THỐNG ---
-RENDER_URL = "https://shop-ws1s.onrender.com"  # Thay đổi thành URL Render của bạn
-MASTER_TOKEN = "8848756408:AAEAcpMvrbihm2n7LMN-nKC-UtKGd2Dgm4g" # Token Bot Cha
-SUPABASE_URL = "https://dmnxbtayyadssvicdxtm.supabase.co"
-SUPABASE_KEY = "sb_publishable_u9nAB8p-53_fxBzpP6lGDg_XInTwvfp"
+load_dotenv()
+
+# Cấu hình thông số môi trường bảo mật
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://dmnxbtayyadssvicdxtm.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "sb_publishable_u9nAB8p-53_fxBzpP6lGDg_XInTwvfp")
+MASTER_BOT_TOKEN = os.getenv("MASTER_BOT_TOKEN", "8848756408:AAEAcpMvrbihm2n7LMN-nKC-UtKGd2Dgm4g")
+RENDER_URL = os.getenv("RENDER_URL", "https://shop-ws1s.onrender.com")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
 
-master_bot = Bot(token=MASTER_TOKEN)
-dp = Dispatcher()
+# Khởi tạo instance cho Bot Cha điều phối hệ thống
+master_bot = telebot.TeleBot(MASTER_BOT_TOKEN, threaded=False)
 
-class BotCreation(StatesGroup):
-    waiting_for_type = State()
-    waiting_for_name = State()
-    waiting_for_admin_id = State()
-    waiting_for_token = State()
+# ==========================================
+# CÁC HÀM TIỆN ÍCH XỬ LÝ DỮ LIỆU TẬP TRUNG (SUPABASE JSONB)
+# ==========================================
 
-# --- BÀN PHÍM ĐIỀU KHIỂN BOT CHA (GIỐNG VIDEO) ---
-main_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🆕 Tạo Bot"), KeyboardButton(text="▶️ Quản Lý Bot")],
-        [KeyboardButton(text="💥 Dịch Vụ MXH 💥"), KeyboardButton(text="💎 Mua Gói VIP")],
-        [KeyboardButton(text="💳 Nạp Tiền"), KeyboardButton(text="👤 Tài Khoản")]
-    ],
-    resize_keyboard=True
-)
+def get_bot_data(token: str):
+    res = supabase.table("sub_bots").select("*").eq("bot_token", token).execute()
+    if res.data:
+        return res.data[0]
+    return None
 
-@app.on_event("startup")
-async def on_startup():
-    await master_bot.set_webhook(f"{RENDER_URL}/webhook/master")
+def save_bot_data(token: str, updates: dict):
+    supabase.table("sub_bots").update(updates).eq("bot_token", token).execute()
 
-# --- WEBHOOK SEPAY (NẠP TIỀN TỰ ĐỘNG) ---
-@app.post("/webhook/sepay")
-async def sepay_webhook(request: Request):
-    data = await request.json()
-    content = data.get("content", "")
-    amount = int(data.get("transferAmount", 0))
-    try:
-        parts = content.split()
-        user_id = None
-        for part in parts:
-            if part.isdigit():
-                user_id = int(part)
-                break
-        if user_id:
-            user = supabase.table("users").select("*").eq("user_id", user_id).execute()
-            if user.data:
-                new_balance = user.data[0]["balance"] + amount
-                supabase.table("users").update({"balance": new_balance}).eq("user_id", user_id).execute()
-                await master_bot.send_message(user_id, f"💳 **Nạp tiền thành công!**\n💰 Số tiền: +{amount:,} VNĐ\n💵 Số dư hiện tại: {new_balance:,} VNĐ")
-                return {"status": "success"}
-    except Exception as e:
-        print(f"Lỗi SePay: {e}")
-    return {"status": "failed"}
+def check_expired(bot_info: dict) -> bool:
+    if not bot_info or not bot_info.get("expired_at"):
+        return True
+    exp_time = datetime.fromisoformat(bot_info["expired_at"].replace("Z", "+00:00"))
+    return datetime.now(exp_time.tzinfo) > exp_time
 
-@app.post("/webhook/master")
-async def master_webhook(request: Request):
-    update = Update.model_validate(await request.json(), context={"bot": master_bot})
-    await dp.feed_update(master_bot, update)
-    return Response(status_code=200)
+# ==========================================
+# LOGIC XỬ LÝ SỰ KIỆN CHO BOT CON (SUB-BOT)
+# ==========================================
 
-# --- XỬ LÝ WEBHOOK CHO TẤT CẢ BOT CON ---
-@app.post("/webhook/sub/{token}")
-async def sub_webhook(token: str, request: Request):
-    try:
-        bot_res = supabase.table("sub_bots").select("*").eq("bot_token", token).execute()
-        if not bot_res.data:
-            return Response(status_code=404)
+def process_sub_bot_event(token: str, update_dict: dict):
+    bot_info = get_bot_data(token)
+    if not bot_info:
+        return
         
-        bot_info = bot_res.data[0]
-        expired_at = datetime.fromisoformat(bot_info['expired_at'].replace('z', '+00:00'))
-        if datetime.now(expired_at.tzinfo) > expired_at:
-            supabase.table("sub_bots").update({"status": "expired"}).eq("bot_token", token).execute()
-            sub_bot = Bot(token=token)
-            await sub_bot.send_message(bot_info['admin_id'], "⚠️ Bot của bạn đã hết hạn dùng thử 2 ngày! Vui lòng gia hạn gói VIP tại Bot Cha.")
-            return Response(status_code=200)
-
-        update_data = await request.json()
-        await process_sub_bot_full_logic(token, bot_info, update_data)
-        return Response(status_code=200)
-    except Exception as e:
-        print(f"Lỗi hệ thống bot con {token[:10]}: {e}")
-        return Response(status_code=500)
-
-# =========================================================================
-# XỬ LÝ 100% LOGIC BẢN GỐC 456HIT.PY SANG WEBHOOK (KHÔNG CẮT GIẢM LỆNH NÀO)
-# =========================================================================
-async def process_sub_bot_full_logic(token: str, bot_info: dict, update_data: dict):
-    bot = Bot(token=token)
-    update = Update.model_validate(update_data, context={"bot": bot})
+    # Tạo instance cục bộ cho bot con đang gửi tín hiệu webhook
+    bot = telebot.TeleBot(token, threaded=False)
     
-    # Xử lý nút bấm Callback Quy Trình Kiểm Tra Nhóm
-    if update.callback_query:
-        call = update.callback_query
-        user_id = str(call.from_user.id)
+    # Ép kiểu dữ liệu JSONB sang mảng/mục từ điển Python
+    users = bot_info.get("users_list", [])
+    admins = bot_info.get("admins_list", [])
+    channels = bot_info.get("channels_list", [])
+    codes = bot_info.get("codes_list", [])
+    ban_users = bot_info.get("ban_user_list", [])
+    invited = bot_info.get("invited_map", {})
+    userdata = bot_info.get("userdata_map", {})
+    log_rutcode = bot_info.get("log_rutcode_list", [])
+    config = bot_info.get("config_data", {})
+    
+    # Thêm ID người tạo bot vào danh sách admin hệ thống mặc định
+    creator_id = bot_info.get("creator_id")
+    if creator_id and creator_id not in admins:
+        admins.append(creator_id)
+
+    update = types.Update.de_json(update_dict)
+    
+    if update.message:
+        msg = update.message
+        user_id = msg.from_user.id
+        u_str = str(user_id)
         
-        channels = json.loads(bot_info['channels_list'])
-        config = json.loads(bot_info['config_data'])
-        invited = json.loads(bot_info['invited_map'])
-        userdata = json.loads(bot_info['userdata_map'])
+        # Kiểm tra thời hạn hoạt động dùng thử 2 ngày của bot con
+        if check_expired(bot_info):
+            bot.send_message(msg.chat.id, "❌ Bot này đã hết hạn dùng thử 2 ngày. Vui lòng liên hệ Bot Cha để gia hạn!")
+            return
+
+        # Kiểm tra trạng thái cấm người dùng truy cập bot
+        if u_str in ban_users and not (user_id in admins):
+            bot.send_message(msg.chat.id, "⛔ Bạn đã bị cấm sử dụng bot này.")
+            return
+
+        # XỬ LÝ LỆNH /START
+        if msg.text and msg.text.startswith("/start"):
+            args = msg.text.split()
+            if u_str not in users:
+                users.append(u_str)
+                userdata[u_str] = {"balance": 0}
+                if len(args) > 1:
+                    ref = args[1]
+                    if ref != u_str:
+                        invited[u_str] = ref # Lưu vết người giới thiệu
+
+            if not channels:
+                bot.send_message(msg.chat.id, "Hiện tại hệ thống chưa thiết lập kênh bắt buộc tham gia.")
+            else:
+                text = "🔍 Vui lòng tham gia vào tất cả các nhóm sau để bắt đầu sử dụng:\n"
+                for ch in channels:
+                    text += f"\n💠 {ch}"
+                markup = types.InlineKeyboardMarkup()
+                markup.add(types.InlineKeyboardButton("✅ Tôi đã tham gia", callback_data="check_join"))
+                bot.send_message(msg.chat.id, text, reply_markup=markup)
+            
+            save_bot_data(token, {"users_list": users, "invited_map": invited, "userdata_map": userdata})
+            return
+
+        # XỬ LÝ THAO TÁC PHÍM CHỨC NĂNG MENU CHÍNH
+        if msg.text == "💰 Số dư của tôi":
+            bal = userdata.get(u_str, {}).get("balance", 0)
+            ref_b = config.get("ref_bonus", 1000)
+            bot.send_message(msg.chat.id, f"💰 Số dư của bạn\n─────\n✨ Hiện tại: {bal} VND\n👉 Mời bạn bè để nhận thêm {ref_b} VND!", parse_mode="Markdown")
+            return
+
+        elif msg.text == "🛒 Rút code":
+            bot.send_message(msg.chat.id, "Hướng Dẫn Thực Hiện:\n─────\n➡️ /rutcode [Tên Nhân Vật] [SỐ TIỀN]\nVD: /rutcode xuanson 1000")
+            return
+
+        elif msg.text == "📄 Link Game":
+            link = config.get("game_link")
+            if link:
+                markup = types.InlineKeyboardMarkup()
+                markup.add(types.InlineKeyboardButton("🎮 VÔ NGAY", url=link))
+                bot.send_message(msg.chat.id, f"🎮 *Link Game Chính Thức:*\n{link}", parse_mode='Markdown', reply_markup=markup)
+            else:
+                bot.send_message(msg.chat.id, "Hiện chưa có link game nào được cập nhật.")
+            return
+
+        elif msg.text == "📊 Thống kê bot":
+            total_users = len(users)
+            total_rut = len(log_rutcode)
+            total_amount = sum(l.get("amount", 0) for l in log_rutcode)
+            text = f"📈<b> Thống kê bot</b>\n─────\n👥 Tổng số user: <b>{total_users}</b>\n🔁 Tổng số lượt rút: <b>{total_rut}</b>\n💸 Tổng tiền đã rút: <b>{total_amount} VND</b>"
+            bot.send_message(msg.chat.id, text, parse_mode="HTML")
+            return
+
+        elif msg.text == "📮MỜI BẠN BÈ":
+            invite_link = f"https://t.me/{bot.get_me().username}?start={user_id}"
+            caption = f"<b>🔍 LINK GIỚI THIỆU CỦA BẠN:</b> <code>{invite_link}</code>\n\n<b>🔻 MỜI 1 BẠN = {config.get('ref_bonus', 1000)} VNĐ</b>\n<b>🤝 TỐI THIỂU RÚT: {config.get('min_rut', 10000)} VNĐ</b>"
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("📤 Chia sẻ vào nhóm", url=f"https://t.me/share/url?url={invite_link}"))
+            
+            img = config.get("invite_image")
+            if img:
+                bot.send_photo(msg.chat.id, photo=img, caption=caption, parse_mode="HTML", reply_markup=markup)
+            else:
+                bot.send_message(msg.chat.id, caption, parse_mode="HTML", reply_markup=markup)
+            return
+
+        # LỆNH ĐIỀU HÀNH HỆ THỐNG /RUTCODE
+        if msg.text and msg.text.startswith("/rutcode"):
+            args = msg.text.split()
+            if len(args) < 3:
+                bot.send_message(msg.chat.id, "Dùng đúng mẫu: /rutcode <tên_nhân_vật> <số_tiền>")
+                return
+            note, amount = args[1], int(args[2])
+            bal = userdata.get(u_str, {}).get("balance", 0)
+            
+            if amount < config.get("min_rut", 10000):
+                bot.send_message(msg.chat.id, f"Số tiền rút tối thiểu là {config.get('min_rut', 10000)}đ.")
+                return
+            if bal < amount:
+                bot.send_message(msg.chat.id, f"Bạn không đủ số dư để thực hiện giao dịch này.")
+                return
+            if not codes:
+                bot.send_message(msg.chat.id, "⚠️ Kho hàng hiện đang hết code, vui lòng quay lại sau.")
+                return
+                
+            code_out = codes.pop(0)
+            userdata[u_str]["balance"] -= amount
+            log_rutcode.append({"user_id": u_str, "amount": amount})
+            
+            bot.send_message(msg.chat.id, f"📤 Rút Thành Công {note}\n\n💵 SỐ TIỀN: {amount} VND\nCODE: <code>{code_out}</code>", parse_mode="HTML")
+            
+            # Gửi thông báo chuyển động số dư cho dàn quản trị viên
+            for adm in admins:
+                try:
+                    bot.send_message(int(adm), f"🔔 Yêu cầu rút từ @{msg.from_user.username} (🆔: {u_str})\n- TNV: {note}\n- Số tiền: {amount} VND.\n- CODE: {code_out}")
+                except: pass
+                
+            save_bot_data(token, {"codes_list": codes, "userdata_map": userdata, "log_rutcode_list": log_rutcode})
+            return
+
+        # CÁC LỆNH QUẢN TRỊ VIÊN (ADMIN COMMANDS)
+        if user_id in admins:
+            if msg.text.startswith("/menu"):
+                markup = types.InlineKeyboardMarkup(row_width=2)
+                markup.add(
+                    types.InlineKeyboardButton("➕ /themkenh", callback_data="sub_themkenh"),
+                    types.InlineKeyboardButton("➖ /xoakenh", callback_data="sub_xoakenh"),
+                    types.InlineKeyboardButton("👤 /themadmin", callback_data="sub_themadmin"),
+                    types.InlineKeyboardButton("❌ /xoaadmin", callback_data="sub_xoaadmin"),
+                    types.InlineKeyboardButton("➕ /themcode", callback_data="sub_themcode"),
+                    types.InlineKeyboardButton("🔥 /xoacodeall", callback_data="sub_xoacodeall"),
+                    types.InlineKeyboardButton("📄 /dscode", callback_data="sub_dscode"),
+                    types.InlineKeyboardButton("➕ /naptien", callback_data="sub_naptien"),
+                    types.InlineKeyboardButton("➖ /trutien", callback_data="sub_trutien"),
+                    types.InlineKeyboardButton("🎁 /thuongmoiban", callback_data="sub_thuongmoiban"),
+                    types.InlineKeyboardButton("💰 /minrut", callback_data="sub_minrut"),
+                    types.InlineKeyboardButton("🚫 /ban", callback_data="sub_ban"),
+                    types.InlineKeyboardButton("✅ /unban", callback_data="sub_unban")
+                )
+                bot.send_message(msg.chat.id, "📋 <b>Menu quản trị hệ thống:</b>", reply_markup=markup, parse_mode="HTML")
+                return
+
+            elif msg.text.startswith("/themkenh"):
+                parts = msg.text.split()
+                if len(parts) > 1:
+                    channels.append(parts[1])
+                    save_bot_data(token, {"channels_list": channels})
+                    bot.send_message(msg.chat.id, f"✅ Đã thêm kênh bắt buộc: {parts[1]}")
+                return
+
+            elif msg.text.startswith("/themcode"):
+                lines = msg.text.split("\n")[1:]
+                added = 0
+                for line in lines:
+                    c = line.strip()
+                    if c and c not in codes:
+                        codes.append(c)
+                        added += 1
+                save_bot_data(token, {"codes_list": codes})
+                bot.send_message(msg.chat.id, f"✅ Thành công thêm {added} mã code vào hệ thống.")
+                return
+
+            elif msg.text.startswith("/naptien"):
+                parts = msg.text.split()
+                if len(parts) == 3:
+                    t_id, amt = parts[1], int(parts[2])
+                    if t_id not in userdata: userdata[t_id] = {"balance": 0}
+                    userdata[t_id]["balance"] += amt
+                    save_bot_data(token, {"userdata_map": userdata})
+                    bot.send_message(msg.chat.id, f"✅ Đã nạp {amt}đ cho ID {t_id}.")
+                return
+
+            elif msg.text.startswith("/ban"):
+                parts = msg.text.split()
+                if len(parts) == 2:
+                    b_id = parts[1]
+                    if b_id not in ban_users: ban_users.append(b_id)
+                    save_bot_data(token, {"ban_user_list": ban_users})
+                    bot.send_message(msg.chat.id, f"✅ Đã ban người dùng ID {b_id}.")
+                return
+                
+            elif msg.text.startswith("/unban"):
+                parts = msg.text.split()
+                if len(parts) == 2:
+                    b_id = parts[1]
+                    if b_id in ban_users: ban_users.remove(b_id)
+                    save_bot_data(token, {"ban_user_list": ban_users})
+                    bot.send_message(msg.chat.id, f"✅ Đã gỡ ban người dùng ID {b_id}.")
+                return
+
+            elif msg.text.startswith("/thuongmoiban"):
+                parts = msg.text.split()
+                if len(parts) == 2:
+                    config["ref_bonus"] = int(parts[1])
+                    save_bot_data(token, {"config_data": config})
+                    bot.send_message(msg.chat.id, f"✅ Đã cập nhật thưởng mời: {parts[1]}đ")
+                return
+
+            elif msg.text.startswith("/minrut"):
+                parts = msg.text.split()
+                if len(parts) == 2:
+                    config["min_rut"] = int(parts[1])
+                    save_bot_data(token, {"config_data": config})
+                    bot.send_message(msg.chat.id, f"✅ Đã cập nhật mức rút tối thiểu: {parts[1]}đ")
+                return
+
+            elif msg.text.startswith("/uplink"):
+                parts = msg.text.split()
+                if len(parts) == 2:
+                    config["game_link"] = parts[1]
+                    save_bot_data(token, {"config_data": config})
+                    bot.send_message(msg.chat.id, f"✅ Đã cập nhật link game: {parts[1]}")
+                return
+
+            elif msg.text.startswith("/linkanh"):
+                parts = msg.text.split()
+                if len(parts) == 2:
+                    config["invite_image"] = parts[1]
+                    save_bot_data(token, {"config_data": config})
+                    bot.send_message(msg.chat.id, f"✅ Đã cập nhật ảnh nền mời: {parts[1]}")
+                return
+
+            elif msg.text.startswith("/thongbao"):
+                args = msg.text.split(" ", 1)
+                if len(args) == 2:
+                    txt = args[1]
+                    for u in users:
+                        try: bot.send_message(int(u), txt)
+                        except: pass
+                    bot.send_message(msg.chat.id, "📢 Đã phát thông báo toàn hệ thống.")
+                return
+
+    elif update.callback_query:
+        call = update.callback_query
+        u_str = str(call.from_user.id)
         
         if call.data == "check_join":
             not_joined = []
             for ch in channels:
                 try:
-                    member = await bot.get_chat_member(ch, int(user_id))
-                    if member.status in ['left', 'kicked']:
-                        not_joined.append(ch)
+                    stat = bot.get_chat_member(ch, call.from_user.id).status
+                    if stat in ['left', 'kicked']: not_joined.append(ch)
                 except:
                     not_joined.append(ch)
-            
+                    
             if not_joined:
-                msg = "❌ Bạn chưa tham gia các kênh sau:\n" + "\n".join(f"💠 {ch}" for ch in not_joined)
-                await bot.send_message(call.message.chat.id, msg)
-                return
-            
-            # Cộng thưởng giới thiệu nếu có trong map trung gian
-            referrer = invited.pop(user_id, None)
-            if referrer:
-                ref_bonus = config.get("ref_bonus", 1)
-                if referrer not in userdata:
-                    userdata[referrer] = {"balance": 0}
-                userdata[referrer]["balance"] += ref_bonus
-                try:
-                    await bot.send_message(int(referrer), f"🎁 BẠN NHẬN {ref_bonus}đ TỪ LƯỢT GIỚI THIỆU {user_id}!")
-                except:
-                    pass
-            
-            # Lưu lại trạng thái DB
-            supabase.table("sub_bots").update({
-                "invited_map": json.dumps(invited),
-                "userdata_map": json.dumps(userdata)
-            }).eq("bot_token", token).execute()
-            
-            # Mở phím menu chính của con bot
-            menu = ReplyKeyboardMarkup(keyboard=[
-                [KeyboardButton(text="💰 Số dư của tôi")],
-                [KeyboardButton(text="🛒 Rút code"), KeyboardButton(text="📮MỜI BẠN BÈ")],
-                [KeyboardButton(text="📄 Link Game"), KeyboardButton(text="📊 Thống kê bot")]
-            ], resize_keyboard=True)
-            await bot.send_message(call.message.chat.id, "✅ Vui lòng thả cảm xúc!3 bài gần nhất để được ưu tiên @ChiaSeKinhNghiemGame!", reply_markup=menu)
-            return
+                msg_err = "❌ Bạn chưa tham gia đủ các kênh:\n" + "\n".join(f"💠 {ch}" for ch in not_joined)
+                bot.send_message(call.message.chat.id, msg_err)
+            else:
+                # Thực hiện cộng tiền thưởng giới thiệu nếu có
+                if u_str in invited:
+                    ref_id = invited.pop(u_str)
+                    bonus = config.get("ref_bonus", 1000)
+                    if ref_id not in userdata: userdata[ref_id] = {"balance": 0}
+                    userdata[ref_id]["balance"] += bonus
+                    try:
+                        bot.send_message(int(ref_id), f"🎁 Bạn được cộng {bonus}đ từ lượt giới thiệu ID {u_str}!")
+                    except: pass
+                    save_bot_data(token, {"invited_map": invited, "userdata_map": userdata})
 
-        # Xử lý các Callback từ nút bấm /menu ẩn của Admin con
-        elif call.data.startswith("admin_"):
-            command = call.data.replace("admin_", "")
-            admins = json.loads(bot_info['admins_list'])
-            if user_id not in admins and int(user_id) != bot_info['admin_id']:
-                return
+                menu = types.ReplyKeyboardMarkup(resize_keyboard=True)
+                menu.row("💰 Số dư của tôi")
+                menu.row("🛒 Rút code", "📮MỜI BẠN BÈ")
+                menu.row("📄 Link Game", "📊 Thống kê bot")
+                bot.send_message(call.message.chat.id, "🎉 Chúc mừng bạn đã đăng ký thành công hệ thống!", reply_markup=menu)
+            bot.answer_callback_query(call.id)
             
-            commands_map = {
-                "themkenh": "/themkenh @tenkenh", "xoakenh": "/xoakenh @tenkenh",
-                "themadmin": "/themadmin user_id", "xoaadmin": "/xoaadmin user_id", "dsadmin": "/dsadmin",
-                "themcode": "/themcode (gửi danh sách code theo dòng)", "xoacode": "/xoacode MÃ_CODE",
-                "xoacodeall": "/xoacodeall", "dscode": "/dscode", "checkcode": "/checkcode",
-                "naptien": "/naptien user_id số_tiền", "trutien": "/trutien user_id số_tiền",
-                "thuongmoiban": "/thuongmoiban số_tiền", "minrut": "/minrut số_tiền",
-                "uplink": "/uplink LINK", "ban": "/ban user_id", "unban": "/unban user_id",
-                "dsban": "/dsban", "thong_bao": "/thongbao nội dung", "chat_user": "/chat ID nội dung"
+        elif call.data.startswith("sub_"):
+            cmd = call.data.replace("sub_", "")
+            cmd_hints = {
+                "themkenh": "/themkenh @username_kenh", "xoakenh": "/xoakenh @username_kenh",
+                "themadmin": "/themadmin user_id", "xoaadmin": "/xoaadmin user_id",
+                "themcode": "/themcode (xuống dòng dán danh sách code)", "xoacodeall": "/xoacodeall",
+                "dscode": "/dscode", "naptien": "/naptien user_id số_tiền",
+                "trutien": "/trutien user_id số_tiền", "thuongmoiban": "/thuongmoiban số_tiền",
+                "minrut": "/minrut số_tiền", "ban": "/ban user_id", "unban": "/unban user_id"
             }
-            if command in commands_map:
-                await bot.send_message(call.message.chat.id, f"✏️ Gõ lệnh: `{commands_map[command]}`", parse_mode="Markdown")
-            return
+            if cmd in cmd_hints:
+                bot.send_message(call.message.chat.id, f"✏️ Hãy gõ cú pháp: <code>{cmd_hints[cmd]}</code>", parse_mode="HTML")
+            bot.answer_callback_query(call.id)
 
-    if not update.message or not update.message.text:
-        return
+# ==========================================
+# LOGIC HỆ THỐNG ĐIỀU PHỐI BOT CHA (MASTER BOT)
+# ==========================================
 
-    message = update.message
-    text = message.text
-    user_id = message.from_user.id
-    str_user_id = str(user_id)
+@master_bot.message_handler(commands=['start'])
+def master_start(message):
+    uid = message.from_user.id
+    # Lưu người dùng vào bảng users tổng
+    supabase.table("users").upsert({"user_id": uid, "username": message.from_user.username}).execute()
     
-    # Khôi phục toàn bộ các mảng dữ liệu mô phỏng file txt/json của bot con
-    users = json.loads(bot_info['users_list'])
-    admins = json.loads(bot_info['admins_list'])
-    channels = json.loads(bot_info['channels_list'])
-    codes = json.loads(bot_info['codes_list'])
-    ban_users = json.loads(bot_info['ban_user_list'])
-    invited = json.loads(bot_info['invited_map'])
-    userdata = json.loads(bot_info['userdata_map'])
-    log_rutcode = json.loads(bot_info['log_rutcode_list'])
-    config = json.loads(bot_info['config_data'])
-    
-    # Định nghĩa hàm kiểm tra quyền Admin nhanh dựa trên danh sách nạp vào DB
-    def check_is_admin(uid):
-        return str(uid) in admins or int(uid) == bot_info['admin_id']
+    msg_welcome = (
+        "🔥 **HỆ THỐNG KHỞI TẠO BOT KIẾM TIỀN AUTOMATION**\n\n"
+        "⚡ Lệnh khả dụng:\n"
+        "➡️ `/taobot <TOKEN>` : Khởi tạo bot con sử dụng thử trong 2 ngày.\n"
+        "➡️ `/status` : Kiểm tra tình trạng hoạt động các dòng bot của bạn.\n"
+        "➡️ `/id` : Lấy nhanh ID định danh tài khoản Telegram của bạn."
+    )
+    master_bot.reply_to(message, msg_welcome, parse_mode="Markdown")
 
-    if str_user_id in ban_users:
-        await message.answer("Bạn đã bị cấm sử dụng bot.")
+@master_bot.message_handler(commands=['id'])
+def master_id(message):
+    master_bot.reply_to(message, f"🆔 ID Telegram của bạn là: `{message.from_user.id}`", parse_mode="Markdown")
+
+@master_bot.message_handler(commands=['taobot'])
+def master_create_bot(message):
+    uid = message.from_user.id
+    parts = message.text.split()
+    if len(parts) < 2:
+        master_bot.reply_to(message, "⚠️ Vui lòng sử dụng cấu trúc: `/taobot <TOKEN_BOT_CON>`", parse_mode="Markdown")
         return
-
-    # LỆNH /start GỐC
-    if text.startswith("/start"):
-        args = text.split()
-        if str_user_id not in users:
-            users.append(str_user_id)
-            userdata[str_user_id] = {"balance": 0}
-            if len(args) > 1 and args[1] != str_user_id:
-                invited[str_user_id] = args[1]
-            
-            supabase.table("sub_bots").update({
-                "users_list": json.dumps(users),
-                "userdata_map": json.dumps(userdata),
-                "invited_map": json.dumps(invited)
-            }).eq("bot_token", token).execute()
-
-        if not channels:
-            await message.answer("Hiện tại chưa có kênh nào để tham gia.")
-            return
-
-        txt = "🔍 Vui lòng vào tất cả các nhóm sau để sử dụng bot\n"
-        for ch in channels:
-            txt += f"\n💠 {ch}"
         
-        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Tôi đã tham gia", callback_data="check_join")]])
-        await message.answer(txt, reply_markup=markup)
-        return
-
-    # SỐ DƯ CỦA TÔI GỐC
-    elif text == "💰 Số dư của tôi":
-        balance = userdata.get(str_user_id, {}).get("balance", 0)
-        await message.answer(f"💰 Số dư của bạn\n─────\n✨ Hiện tại: {balance} VND\n👉 Mời bạn bè để nhận thêm ngẫu nhiên {config.get('ref_bonus', 1)} VND mỗi người!", parse_mode='Markdown')
-
-    # MỜI BẠN BÈ GỐC
-    elif text == "📮MỜI BẠN BÈ":
-        bot_me = await bot.get_me()
-        invite_link = f"https://t.me/{bot_me.username}?start={user_id}"
-        caption = f"<b>🔍 LINK GIỚI THIỆU CỦA BẠN: </b> <code>{invite_link}</code>\n\n<b>🔻 MỜI 1 BẠN = {config.get('ref_bonus', 1)} VNĐ</b>\n<b>🤝 ĐIỂM TỐI THIỂU GIAO DỊCH: {config.get('min_rut', 1000)} VNĐ</b>"
-        share_url = f"https://t.me/share/url?url={invite_link}&text=Tham gia bot nhận quà: {invite_link}"
-        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📤 Chia sẻ vào nhóm", url=share_url)]])
-        
-        if config.get("invite_image"):
-            await bot.send_photo(message.chat.id, photo=config["invite_image"], caption=caption, parse_mode="HTML", reply_markup=markup)
-        else:
-            await message.answer(caption, parse_mode="HTML", reply_markup=markup)
-
-    # RÚT CODE NÚT GIAO DIỆN PHÍM CƠ
-    elif text == "🛒 Rút code":
-        await message.answer("Hướng Dẫn Thực Hiện:\n─────\n➡️/rutcode [ID TELE OR TNV]  [ SỐ TIỀN ]\nVD  /rutcode xuanson 1000")
-
-    # LỆNH /rutcode GỐC CHẠY CHÍNH XÁC LOGIC TRỪ TIỀN
-    elif text.startswith("/rutcode"):
-        args = text.split()
-        if len(args) < 3:
-            await message.answer("Dùng: /rutcode <ghi_chú> <số_tiền>")
-            return
-        note = args[1]
-        try:
-            amount = int(args[2])
-        except:
-            await message.answer("Số tiền không hợp lệ.")
-            return
-
-        balance = userdata.get(str_user_id, {}).get("balance", 0)
-        min_rut = config.get("min_rut", 1000)
-
-        if amount < min_rut:
-            await message.answer(f"Số tiền rút tối thiểu là {min_rut}đ.")
-            return
-        if balance < amount:
-            await message.answer(f"Bạn không đủ số dư để rút {amount}đ.")
-            return
-        if not codes:
-            await message.answer("⚠️ Hiện tại không còn code nào.")
-            return
-
-        code = codes.pop(0)
-        userdata[str_user_id]["balance"] -= amount
-        log_entry = {"user_id": str_user_id, "amount": amount}
-        log_rutcode.append(log_entry)
-
-        supabase.table("sub_bots").update({
-            "codes_list": json.dumps(codes),
-            "userdata_map": json.dumps(userdata),
-            "log_rutcode_list": json.dumps(log_rutcode)
-        }).eq("bot_token", token).execute()
-
-        await message.answer(f"📤 Rút Thành Công {note} \n\n 💵SỐ TIỀN: {amount} VNDD\n CODE: {code}")
-        
-        # Bắn báo cáo về nhóm Admin hoặc Admin gốc
-        try:
-            await bot.send_message(bot_info['admin_id'], f"Yêu cầu rút từ @{message.from_user.username} \n(🆔: {user_id})\n\n-TÊN NHÂN VẬT: {note}\n-Số tiền: {amount} VND.\n-CODE: {code}")
-        except:
-            pass
-
-    # LINK GAME PHÍM CƠ GỐC
-    elif text == "📄 Link Game":
-        link = config.get("game_link")
-        if link:
-            markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎮 VÔ NGAY", url=link)]])
-            await message.answer(f"🎮 *Link Game Chính Thức:*\n[{link}]({link})", parse_mode='Markdown', reply_markup=markup)
-        else:
-            await message.answer("Hiện chưa có link game nào được cập nhật.")
-
-    # THỐNG KÊ BOT PHÍM CƠ GỐC
-    elif text == "📊 Thống kê bot":
-        total_users = len(users)
-        total_rut = len(log_rutcode)
-        total_amount = sum(log.get("amount", 0) for log in log_rutcode)
-        await message.answer(f"📈<b> Thống kê bot</b>\n─────\n👥 Tổng số user: <b>{total_users}</b>\n🔁 Tổng số lượt rút: <b>{total_rut}</b>\n💸 Tổng tiền đã rút: <b>{total_amount}VND</b>", parse_mode="HTML")
-
-    # =========================================================================
-    # HỆ THỐNG TOÀN BỘ CÁC LỆNH ADMIN CON KHÔNG THAY ĐỔI
-    # =========================================================================
-    elif text == "/menu" and check_is_admin(user_id):
-        markup = InlineKeyboardMarkup(row_width=2, inline_keyboard=[
-            [InlineKeyboardButton(text="➕ /themkenh", callback_data="admin_themkenh"), InlineKeyboardButton(text="➖ /xoakenh", callback_data="admin_xoakenh")],
-            [InlineKeyboardButton(text="👤 /themadmin", callback_data="admin_themadmin"), InlineKeyboardButton(text="❌ /xoaadmin", callback_data="admin_xoaadmin")],
-            [InlineKeyboardButton(text="📋 /dsadmin", callback_data="admin_dsadmin"), InlineKeyboardButton(text="➕ /themcode", callback_data="admin_themcode")],
-            [InlineKeyboardButton(text="🗑️ /xoacode", callback_data="admin_xoacode"), InlineKeyboardButton(text="🔥 /xoacodeall", callback_data="admin_xoacodeall")],
-            [InlineKeyboardButton(text="📄 /dscode", callback_data="admin_dscode"), InlineKeyboardButton(text="🔍 /checkcode", callback_data="admin_checkcode")],
-            [InlineKeyboardButton(text="➕ /naptien", callback_data="admin_naptien"), InlineKeyboardButton(text="➖ /trutien", callback_data="admin_trutien")],
-            [InlineKeyboardButton(text="🎁 /thuongmoiban", callback_data="admin_thuongmoiban"), InlineKeyboardButton(text="💰 /minrut", callback_data="admin_minrut")],
-            [InlineKeyboardButton(text="🔗 /uplink", callback_data="admin_uplink"), InlineKeyboardButton(text="🚫 /ban", callback_data="admin_ban")],
-            [InlineKeyboardButton(text="✅ /unban", callback_data="admin_unban"), InlineKeyboardButton(text="📃 /dsban", callback_data="admin_dsban")]
-        ])
-        await message.answer("📋 <b>Menu quản trị:</b>\nChọn thao tác bên dưới:", reply_markup=markup, parse_mode="HTML")
-
-    elif text.startswith("/themkenh") and check_is_admin(user_id):
-        args = text.split()
-        if len(args) >= 2:
-            chat_id = args[1]
-            if chat_id not in channels:
-                channels.append(chat_id)
-                supabase.table("sub_bots").update({"channels_list": json.dumps(channels)}).eq("bot_token", token).execute()
-                await message.answer(f"Đã thêm kênh: {chat_id}")
-
-    elif text.startswith("/xoakenh") and check_is_admin(user_id):
-        args = text.split()
-        if len(args) >= 2:
-            chat_id = args[1]
-            if chat_id in channels:
-                channels.remove(chat_id)
-                supabase.table("sub_bots").update({"channels_list": json.dumps(channels)}).eq("bot_token", token).execute()
-                await message.answer(f"Đã xoá kênh: {chat_id}")
-
-    elif text.startswith("/themcode") and check_is_admin(user_id):
-        lines = text.split('\n')
-        if len(lines) >= 2:
-            new_arr = [line.strip() for line in lines[1:] if line.strip() and line.strip() not in codes]
-            codes.extend(new_arr)
-            supabase.table("sub_bots").update({"codes_list": json.dumps(codes)}).eq("bot_token", token).execute()
-            await message.answer(f"Đã thêm {len(new_arr)} code mới.")
-
-    elif text == "/xoacodeall" and check_is_admin(user_id):
-        supabase.table("sub_bots").update({"codes_list": "[]"}).eq("bot_token", token).execute()
-        await message.answer("🗑️ Đã xóa toàn bộ mã code.")
-
-    elif text == "/dscode" and check_is_admin(user_id):
-        if not codes: await message.answer("✅ Danh sách code đang trống.")
-        else: await message.answer("📄 Danh sách code:\n\n" + "\n".join(codes))
-
-    elif text == "/checkcode" and check_is_admin(user_id):
-        await message.answer(f"✅Tổng số code còn lại: {len(codes)}")
-
-    elif text.startswith("/minrut") and check_is_admin(user_id):
-        config["min_rut"] = int(text.split()[1])
-        supabase.table("sub_bots").update({"config_data": json.dumps(config)}).eq("bot_token", token).execute()
-        await message.answer(f"✅ Đã cập nhật min_rut = {config['min_rut']}đ")
-
-    elif text.startswith("/thuongmoiban") and check_is_admin(user_id):
-        config["ref_bonus"] = int(text.split()[1])
-        supabase.table("sub_bots").update({"config_data": json.dumps(config)}).eq("bot_token", token).execute()
-        await message.answer(f"✅ Đã cập nhật tiền thưởng mời bạn = {config['ref_bonus']}đ")
-
-    elif text.startswith("/uplink") and check_is_admin(user_id):
-        config["game_link"] = text.split()[1].strip()
-        supabase.table("sub_bots").update({"config_data": json.dumps(config)}).eq("bot_token", token).execute()
-        await message.answer(f"Đã cập nhật link game:\n{config['game_link']}")
-
-    elif text.startswith("/ban") and check_is_admin(user_id):
-        ban_id = text.split()[1].strip()
-        if ban_id not in ban_users:
-            ban_users.append(ban_id)
-            supabase.table("sub_bots").update({"ban_user_list": json.dumps(ban_users)}).eq("bot_token", token).execute()
-            await message.answer(f"Đã ban user ID {ban_id}.")
-
-    elif text.startswith("/unban") and check_is_admin(user_id):
-        unban_id = text.split()[1].strip()
-        if unban_id in ban_users:
-            ban_users.remove(unban_id)
-            supabase.table("sub_bots").update({"ban_user_list": json.dumps(ban_users)}).eq("bot_token", token).execute()
-            await message.answer(f"✅ Đã gỡ ban người dùng ID {unban_id}.")
-
-    elif text.startswith("/naptien") and check_is_admin(user_id):
-        _, target_id, amount = text.strip().split()
-        if target_id not in userdata: userdata[target_id] = {"balance": 0}
-        userdata[target_id]["balance"] += int(amount)
-        supabase.table("sub_bots").update({"userdata_map": json.dumps(userdata)}).eq("bot_token", token).execute()
-        await message.answer(f"✅ Đã nạp {amount}đ cho ID {target_id}.")
-
-    elif text.startswith("/trutien") and check_is_admin(user_id):
-        _, target_id, amount = text.strip().split()
-        if target_id in userdata and userdata[target_id]["balance"] >= int(amount):
-            userdata[target_id]["balance"] -= int(amount)
-            supabase.table("sub_bots").update({"userdata_map": json.dumps(userdata)}).eq("bot_token", token).execute()
-            await message.answer(f"✅ Đã trừ {amount}đ của ID {target_id}.")
-
-    elif text.startswith("/themadmin") and check_is_admin(user_id):
-        new_admin = text.split()[1].strip()
-        if new_admin not in admins:
-            admins.append(new_admin)
-            supabase.table("sub_bots").update({"admins_list": json.dumps(admins)}).eq("bot_token", token).execute()
-            await message.answer(f"Đã thêm admin mới: {new_admin}")
-
-    elif text.startswith("/xoaadmin") and check_is_admin(user_id):
-        remove_id = text.split()[1].strip()
-        if remove_id in admins:
-            admins.remove(remove_id)
-            supabase.table("sub_bots").update({"admins_list": json.dumps(admins)}).eq("bot_token", token).execute()
-            await message.answer(f"Đã xoá admin: {remove_id}")
-
-    elif text == "/dsadmin" and check_is_admin(user_id):
-        await message.answer(f"✅<b>Danh sách admin:</b>\n" + "\n".join(admins), parse_mode="HTML")
-
-    elif text.startswith("/thongbao") and check_is_admin(user_id):
-        content = text.split(" ", 1)[1]
-        for uid in users:
-            try: await bot.send_message(int(uid), content)
-            except: continue
-        await message.answer("✅ Đã gửi thông báo đến toàn bộ user thành công.")
-
-    elif text.startswith("/chat") and check_is_admin(user_id):
-        _, target_id, content = text.split(" ", 2)
-        try:
-            await bot.send_message(int(target_id), content)
-            await message.answer("✅ Đã gửi tin nhắn.")
-        except Exception as e:
-            await message.answer(f"Lỗi: {e}")
-
-# =========================================================================
-# QUY TRÌNH LUỒNG TẠO BOT CỦA BOT CHA (MASTER BOT)
-# =========================================================================
-@dp.message(F.text == "🆕 Tạo Bot")
-async def init_create_bot(message: Message, state: FSMContext):
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎁 Bot Mời Bạn Bè Nhận Code", callback_data="type_bot_code")]
-    ])
-    await message.answer("🤖 Vui lòng chọn loại Bot bạn muốn khởi tạo:", reply_markup=markup)
-    await state.set_state(BotCreation.waiting_for_type)
-
-@dp.callback_query(BotCreation.waiting_for_type)
-async def process_type(call: InlineKeyboardMarkup, state: FSMContext):
-    await state.update_data(bot_type=call.data)
-    await call.message.answer("✍️ Nhập Tên CON BOT Nhé:\n*(Ví dụ: Bot Phát Code)*", parse_mode="Markdown")
-    await state.set_state(BotCreation.waiting_for_name)
-
-@dp.message(BotCreation.waiting_for_name)
-async def process_name(message: Message, state: FSMContext):
-    await state.update_data(bot_name=message.text)
-    await message.answer("🆔 Nhập Admin ID (ID Telegram người quản lý bot này):")
-    await state.set_state(BotCreation.waiting_for_admin_id)
-
-@dp.message(BotCreation.waiting_for_admin_id)
-async def process_admin_id(message: Message, state: FSMContext):
-    if not message.text.isdigit():
-        await message.answer("❌ ID phải là số. Nhập lại:")
-        return
-    await state.update_data(admin_id=int(message.text))
-    await message.answer("🔑 Vui lòng gửi Token Bot lấy từ @BotFather:")
-    await state.set_state(BotCreation.waiting_for_token)
-
-@dp.message(BotCreation.waiting_for_token)
-async def process_token(message: Message, state: FSMContext):
-    token = message.text.strip()
-    user_data = await state.get_data()
-    user_id = message.from_user.id
+    sub_token = parts[1].strip()
     
     try:
-        test_bot = Bot(token=token)
-        await test_bot.get_me()
-        await test_bot.set_webhook(f"{RENDER_URL}/webhook/sub/{token}")
+        # Kiểm tra tính hợp lệ của Token thông qua API Telegram trước khi gán Webhook
+        test_bot = telebot.TeleBot(sub_token)
+        bot_user = test_bot.get_me()
         
-        # Thiết lập thời gian thử nghiệm đúng chuẩn 2 ngày miễn phí
-        expired_trial = datetime.now() + timedelta(days=2)
+        # Thiết lập thời gian hết hạn cố định dùng thử là 2 ngày
+        exp_date = (datetime.now() + timedelta(days=2)).isoformat()
         
-        supabase.table("sub_bots").insert({
-            "bot_token": token,
-            "creator_id": user_id,
-            "admin_id": user_data['admin_id'],
-            "bot_name": user_data['bot_name'],
-            "bot_type": user_data['bot_type'],
+        # Đồng bộ cấu hình tạo mới lên Supabase Database
+        supabase.table("sub_bots").upsert({
+            "bot_token": sub_token,
+            "creator_id": uid,
+            "admin_id": uid,
             "status": "running",
-            "expired_at": expired_trial.isoformat()
+            "expired_at": exp_date
         }).execute()
         
-        await message.answer(f"✅ Kết nối thành công!\n🤖 Bot **{user_data['bot_name']}** đã chạy trực tuyến.\n🎁 Nhận ngay **2 ngày thử nghiệm miễn phí**.\n📅 Hạn dùng: {expired_trial.strftime('%d/%m/%Y %H:%M')}", reply_markup=main_menu)
-        await state.clear()
+        # Gán Webhook chỉ định cổng tiếp nhận tín hiệu từ máy chủ Telegram về Render
+        webhook_url = f"{RENDER_URL}/webhook/sub/{sub_token}"
+        test_bot.remove_webhook()
+        test_bot.set_webhook(url=webhook_url)
+        
+        success_msg = (
+            f"✅ **TẠO BOT THÀNH CÔNG!**\n\n"
+            f"🤖 Tên Bot: @{bot_user.username}\n"
+            f"⏳ Thời gian dùng thử: **2 ngày**\n"
+            f"📅 Hết hạn: `{exp_date}`\n\n"
+            f"👉 Nhấp vào @{bot_user.username} rồi gõ `/menu` để thiết lập kênh, nạp code!"
+        )
+        master_bot.reply_to(message, success_msg, parse_mode="Markdown")
+        
     except Exception as e:
-        await message.answer(f"❌ Khởi chạy thất bại: {e}")
+        master_bot.reply_to(message, f"❌ Lỗi thiết lập bot con: `{str(e)}`. Vui lòng kiểm tra lại Token.")
+
+@master_bot.message_handler(commands=['status'])
+def master_status(message):
+    uid = message.from_user.id
+    res = supabase.table("sub_bots").select("*").eq("creator_id", uid).execute()
+    if not res.data:
+        master_bot.reply_to(message, "Bạn chưa khởi tạo con bot nào trên hệ thống.")
+        return
+        
+    txt = "📊 **DANH SÁCH BOT CỦA BẠN:**\n"
+    for b in res.data:
+        token_hide = b['bot_token'][:10] + "..."
+        txt += f"\n🤖 Token: `{token_hide}`\n⏳ Hạn dùng: `{b['expired_at']}`\n"
+    master_bot.reply_to(message, txt, parse_mode="Markdown")
+
+# ==========================================
+# THIẾT LẬP ROUTING ENDPOINT (FASTAPI GATEWAY)
+# ==========================================
+
+@app.post("/webhook/master")
+async def handle_master_webhook(request: Request):
+    """Tiếp nhận và xử lý dòng tín hiệu của Bot Cha"""
+    json_data = await request.json()
+    update = types.Update.de_json(json_data)
+    master_bot.process_new_updates([update])
+    return Response(status_code=200)
+
+@app.post("/webhook/sub/{token}")
+async def handle_sub_webhook(token: str, request: Request):
+    """Hàm trung chuyển định tuyến tín hiệu Webhook cho toàn bộ dàn Bot Con"""
+    json_data = await request.json()
+    try:
+        process_sub_bot_event(token, json_data)
+    except Exception as e:
+        print(f"Lỗi thực thi bot con [{token[:5]}]: {e}")
+    return Response(status_code=200)
+
+@app.post("/webhook/sepay")
+async def handle_sepay_webhook(request: Request):
+    """Cổng tự động nhận cổng thanh toán chuyển khoản SePay (MSB)"""
+    data = await request.json()
+    
+    # Bóc tách chuỗi thông tin nội dung giao dịch (Ví dụ nội dung: NAP 6302038392)
+    content = data.get("content", "")
+    amount = int(data.get("amount", 0))
+    
+    if "NAP" in content.upper():
+        try:
+            parts = content.split()
+            target_user_id = int(parts[1])
+            
+            # Thực hiện cộng tiền trực tiếp vào tài khoản người dùng trên Supabase
+            res = supabase.table("users").select("*").eq("user_id", target_user_id).execute()
+            if res.data:
+                new_bal = res.data[0]["balance"] + amount
+                supabase.table("users").update({"balance": new_bal}).eq("user_id", target_user_id).execute()
+                
+                # Gửi tin nhắn thông báo tự động về máy chủ Telegram của khách hàng
+                try: master_bot.send_message(target_user_id, f"✅ Hệ thống đã nhận {amount}đ từ SePay. Số dư mới: {new_bal}đ")
+                except: pass
+        except Exception as e:
+            print(f"Lỗi xử lý cộng tiền Webhook SePay: {e}")
+            
+    return Response(status_code=200)
+
+@app.get("/")
+def home():
+    """Hàm giữ môi trường Render Free luôn hoạt động, tránh trạng thái ngủ đông"""
+    return {"status": "Hệ thống máy chủ Multibot vận hành ổn định 24/7"}
