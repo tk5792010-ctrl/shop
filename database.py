@@ -10,7 +10,7 @@ SUPABASE_KEY = "sb_publishable_u9nAB8p-53_fxBzpP6lGDg_XInTwvfp"
 
 db: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# --- Xử lý bảng users ---
+# --- XỬ LÝ BẢNG USERS ---
 def get_user(user_id: int):
     try:
         res = db.table("users").select("*").eq("user_id", user_id).execute()
@@ -39,7 +39,7 @@ def update_user_balance(user_id: int, new_balance: int):
     except Exception as e:
         print(f"Lỗi update_user_balance: {e}")
 
-# --- Xử lý bảng sub_bots ---
+# --- XỬ LÝ BẢNG SUB_BOTS ---
 def get_sub_bot(token: str):
     try:
         res = db.table("sub_bots").select("*").eq("bot_token", token).execute()
