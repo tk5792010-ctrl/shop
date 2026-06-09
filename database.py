@@ -4,45 +4,73 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Cấu hình Supabase (Gắn cứng luôn như mày muốn)
+# Cấu hình Supabase cố định của mày
 SUPABASE_URL = "https://dmnxbtayyadssvicdxtm.supabase.co"
 SUPABASE_KEY = "sb_publishable_u9nAB8p-53_fxBzpP6lGDg_XInTwvfp"
 
 db: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# --- Xử lý bảng users (Dùng cho Master Bot và Nạp Tiền) ---
+# --- Xử lý bảng users ---
 def get_user(user_id: int):
-    res = db.table("users").select("*").eq("user_id", user_id).execute()
-    return res.data[0] if res.data else None
+    try:
+        res = db.table("users").select("*").eq("user_id", user_id).execute()
+        return res.data[0] if res.data else None
+    except Exception as e:
+        print(f"Lỗi get_user: {e}")
+        return None
 
 def create_or_update_user(user_id: int, username: str = None, balance_add: int = 0):
-    user = get_user(user_id)
-    if user:
-        new_balance = user['balance'] + balance_add
-        db.table("users").update({"username": username, "balance": new_balance}).eq("user_id", user_id).execute()
-        return new_balance
-    else:
-        db.table("users").insert({"user_id": user_id, "username": username, "balance": balance_add}).execute()
+    try:
+        user = get_user(user_id)
+        if user:
+            new_balance = int(user['balance']) + int(balance_add)
+            db.table("users").update({"username": username, "balance": new_balance}).eq("user_id", user_id).execute()
+            return new_balance
+        else:
+            db.table("users").insert({"user_id": user_id, "username": username, "balance": int(balance_add)}).execute()
+            return balance_add
+    except Exception as e:
+        print(f"Lỗi create_or_update_user: {e}")
         return balance_add
 
 def update_user_balance(user_id: int, new_balance: int):
-    db.table("users").update({"balance": new_balance}).eq("user_id", user_id).execute()
+    try:
+        db.table("users").update({"balance": int(new_balance)}).eq("user_id", user_id).execute()
+    except Exception as e:
+        print(f"Lỗi update_user_balance: {e}")
 
-# --- Xử lý bảng sub_bots (Dùng cho Bot Con) ---
+# --- Xử lý bảng sub_bots ---
 def get_sub_bot(token: str):
-    res = db.table("sub_bots").select("*").eq("bot_token", token).execute()
-    return res.data[0] if res.data else None
+    try:
+        res = db.table("sub_bots").select("*").eq("bot_token", token).execute()
+        return res.data[0] if res.data else None
+    except Exception as e:
+        print(f"Lỗi get_sub_bot: {e}")
+        return None
 
 def get_bots_by_creator(creator_id: str):
-    res = db.table("sub_bots").select("*").eq("creator_id", creator_id).execute()
-    return res.data if res.data else []
+    try:
+        res = db.table("sub_bots").select("*").eq("creator_id", str(creator_id)).execute()
+        return res.data if res.data else []
+    except Exception as e:
+        print(f"Lỗi get_bots_by_creator: {e}")
+        return []
 
 def save_sub_bot(bot_data: dict):
-    db.table("sub_bots").upsert(bot_data).execute()
+    try:
+        db.table("sub_bots").upsert(bot_data).execute()
+    except Exception as e:
+        print(f"Lỗi save_sub_bot: {e}")
 
 def update_sub_bot_status(token: str, status: str):
-    db.table("sub_bots").update({"status": status}).eq("bot_token", token).execute()
+    try:
+        db.table("sub_bots").update({"status": status}).eq("bot_token", token).execute()
+    except Exception as e:
+        print(f"Lỗi update_sub_bot_status: {e}")
 
 def update_sub_bot_data(token: str, updates: dict):
-    db.table("sub_bots").update(updates).eq("bot_token", token).execute()
-  
+    try:
+        db.table("sub_bots").update(updates).eq("bot_token", token).execute()
+    except Exception as e:
+        print(f"Lỗi update_sub_bot_data: {e}")
+        
