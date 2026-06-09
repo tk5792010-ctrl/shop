@@ -1,3 +1,5 @@
-pyTelegramBotAPI
-Flask
-gunicorn
+fastapi
+uvicorn
+aiogram
+supabase
+python-dotenv
