@@ -1,3 +1,5 @@
+import asyncio
+import httpx
 import os
 import time
 import random
@@ -569,3 +571,27 @@ async def handle_sepay_webhook(request: Request):
 @app.get("/")
 def home():
     return {"status": "running", "message": "Hệ thống máy chủ vận hành mượt mà, sẵn sàng không lỗi lầm."}
+
+# ==========================================
+# HÀM GIỮ HOẠT ĐỘNG (KEEP-ALIVE) CHỐNG NGỦ ĐÔNG
+# ==========================================
+async def keep_alive_ping():
+    """Hàm chạy ngầm gửi request liên tục đến URL chính để Render không bao giờ ngủ"""
+    # Đợi 10 giây sau khi startup để đảm bảo server đã lên hẳn
+    await asyncio.sleep(10)
+    
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                # Gửi request đến chính trang chủ "/" của bạn
+                response = await client.get(RENDER_URL, timeout=10)
+                if response.status_code == 200:
+                    print(f"⏰ [Keep-Alive] Ping thành công đến {RENDER_URL} - Server đang thức!")
+                else:
+                    print(f"⚠️ [Keep-Alive] Ping có phản hồi nhưng lỗi status: {response.status_code}")
+            except Exception as e:
+                print(f"❌ [Keep-Alive] Lỗi gửi Ping tự động: {e}")
+            
+            # Cứ mỗi 10 phút (600 giây) sẽ ping một lần (An toàn nhất cho Render)
+            await asyncio.sleep(600)
+            
