@@ -5,8 +5,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Cấu hình Supabase cố định của mày
-SUPABASE_URL = "https://dmnxbtayyadssvicdxtm.supabase.co"
-SUPABASE_KEY = "sb_publishable_u9nAB8p-53_fxBzpP6lGDg_XInTwvfp"
+SUPABASE_URL = "https://cydwlctvwtbilfahbhhl.supabase.co"
+SUPABASE_KEY = "sb_publishable_xpEuq8uIlSnMidXzOYY3HA_g7PEPp2A"
 
 db: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
