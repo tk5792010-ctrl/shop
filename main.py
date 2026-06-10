@@ -15,7 +15,7 @@ import database as db
 # CẤU HÌNH HỆ THỐNG CỐ ĐỊNH
 # ==========================================
 RENDER_URL = "https://shop-ws1s.onrender.com"
-MASTER_TOKEN = "8848756408:AAEAcpMvrbihm2n7LMN-nKC-UtKGd2Dgm4g"
+MASTER_TOKEN = "8848756408:AAH9BghYsbYnJO6Ce1Y-JrEnJDPChI4xQfk"
 
 app = FastAPI()
 master_bot = telebot.TeleBot(MASTER_TOKEN, threaded=False)
