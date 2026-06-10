@@ -575,7 +575,7 @@ def home():
 # ==========================================
 # HÀM GIỮ HOẠT ĐỘNG (KEEP-ALIVE) CHỐNG NGỦ ĐÔNG
 # ==========================================
-async def keep_alive_ping():
+async def keep_alive_ping():y
     """Hàm chạy ngầm gửi request liên tục đến URL chính để Render không bao giờ ngủ"""
     # Đợi 10 giây sau khi startup để đảm bảo server đã lên hẳn
     await asyncio.sleep(10)
@@ -595,17 +595,3 @@ async def keep_alive_ping():
             # Cứ mỗi 10 phút (600 giây) sẽ ping một lần (An toàn nhất cho Render)
             await asyncio.sleep(600)
             
-@app.on_event("startup")
-async def on_startup():
-    try:
-        # --- DÒNG THÊM MỚI CHẠY TỰ ĐỘNG PING ---
-        asyncio.create_task(keep_alive_ping())
-        # ---------------------------------------
-
-        master_bot.delete_webhook()
-        webhook_master_url = f"{RENDER_URL}/webhook/master"
-        master_bot.set_webhook(url=webhook_master_url, drop_pending_updates=True)
-        print(f"✅ Đã thiết lập Webhook Master thành công: {webhook_master_url}")
-    except Exception as e:
-        print(f"❌ Lỗi thiết lập Webhook Master: {e}")
-        
