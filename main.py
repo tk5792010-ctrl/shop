@@ -124,15 +124,15 @@ def acc_info(message):
 @master_bot.message_handler(func=lambda m: m.text == "💳 Nạp Tiền Hệ Thống")
 def deposit_info(message):
     uid = message.from_user.id
-    bank_bin = "970416"
-    account_no = "49581007"
-    account_name = "TRUONG GIA NHU"
+    bank_bin = "970426"
+    account_no = "96886693002613"
+    account_name = "NGUYEN THANH HOP"
     content = f"NAP {uid}"
     qr_url = f"https://img.vietqr.io/image/{bank_bin}-{account_no}-compact2.png?amount=30000&addInfo={content}&accountName={account_name}"
     msg = (
         "💳 <b>CỔNG NẠP TIỀN TỰ ĐỘNG KHÔNG LỖI VIETQR</b>\n"
         "━━━━━━━━━━━━━━━\n"
-        f"🏦 Ngân hàng thụ hưởng: <b>ACB BANK</b>\n"
+        f"🏦 Ngân hàng thụ hưởng: <b>MSB</b>\n"
         f"🔢 Số tài khoản: <b>{account_no}</b>\n"
         f"👤 Chủ tài khoản: <b>{account_name}</b>\n"
         f"📝 Nội dung chuyển khoản: <code>NAP {uid}</code>\n"
